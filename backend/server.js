@@ -440,22 +440,46 @@ app.get('/api/search', async (req, res) => {
         
         const folder6 = String(folderNum).padStart(6, '0');
         const folder5 = String(folderNum).padStart(5, '0');
+        const folder3 = String(folderNum).padStart(3, '0');
         
         let years = [];
         if (yearRaw) {
-          const year = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
-          years.push(year);
+          const year4 = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
+          const year2 = yearRaw.length === 4 ? yearRaw.slice(2) : yearRaw;
+          years.push({ year4, year2 });
         } else {
           // Fallback check common years
-          years = ['2025', '2024', '2026', '2023', '2027', '2028', '2022', '2029', '2020', '2021'];
+          const commonYears = ['2025', '2024', '2026', '2023', '2027', '2028', '2022', '2029', '2020', '2021'];
+          commonYears.forEach(y => {
+            years.push({ year4: y, year2: y.slice(2) });
+          });
         }
+        
+        const boxCodeVariations = new Set();
+        years.forEach(({ year4, year2 }) => {
+          // Format dots & padding
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder6}.${year4}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder5}.${year4}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder3}.${year4}`);
+          
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder6}.${year2}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder5}.${year2}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder3}.${year2}`);
+          
+          // Format no-dots or 3-digit padding (like P011.A001.25)
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder3}.${year2}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder3}.${year4}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder5}.${year2}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder6}.${year2}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder5}.${year4}`);
+          boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder6}.${year4}`);
+        });
         
         const keys = ['NO.BOKS', 'NO. BOKS', 'NO BOKS', 'NO_BOKS', 'KODE BOKS', 'KODE_BOKS', 'BOKS', 'BOX'];
         const containmentClauses = [];
         queryParams = [];
         
-        years.forEach(year => {
-          const boxCode = `P${unitNum}.${boxLetter}.${folder6}.${year}`;
+        boxCodeVariations.forEach(boxCode => {
           keys.forEach(key => {
             queryParams.push(JSON.stringify({ [key]: boxCode }));
             containmentClauses.push(`r.row_data @> $${queryParams.length}`);
