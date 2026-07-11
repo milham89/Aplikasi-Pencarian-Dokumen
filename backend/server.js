@@ -430,29 +430,38 @@ app.get('/api/search', async (req, res) => {
       queryParams = [parseInt(fileId)];
     } else {
       // Try to parse query as a standard box/pelaksana code (e.g. P011.A001.25 or P011.A.000001.2025)
-      const codeMatch = queryText.trim().match(/^[pP](\d+)[\s\.]*([a-zA-Z])[\s\.]*(\d+)(?:[\s\.]*(\d{2,4}))?$/);
+      var codeMatch = queryText.trim().match(/^[pP](\d+)[\s\.]*([a-zA-Z])[\s\.]*(\d+)(?:[\s\.]*(\d{2,4}))?$/);
       
       if (codeMatch) {
         const unitNum = codeMatch[1];
-        const boxLetter = codeMatch[2];
+        const boxLetter = codeMatch[2].toUpperCase();
         const folderNum = parseInt(codeMatch[3], 10);
         const yearRaw = codeMatch[4];
         
         const folder6 = String(folderNum).padStart(6, '0');
         const folder5 = String(folderNum).padStart(5, '0');
         
-        let yearPart = '';
+        let years = [];
         if (yearRaw) {
           const year = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
-          yearPart = '.' + year;
+          years.push(year);
         } else {
-          yearPart = '%';
+          // Fallback check common years
+          years = ['2025', '2024', '2026', '2023', '2027', '2028', '2022', '2029', '2020', '2021'];
         }
         
-        const pattern1 = `%P${unitNum}.${boxLetter}.${folder6}${yearPart}%`;
-        const pattern2 = `%P${unitNum}%${boxLetter}${folder5}${yearPart}%`;
+        const keys = ['NO.BOKS', 'NO. BOKS', 'NO BOKS', 'NO_BOKS', 'KODE BOKS', 'KODE_BOKS', 'BOKS', 'BOX'];
+        const containmentClauses = [];
+        queryParams = [];
         
-        queryParams = [pattern1, pattern2];
+        years.forEach(year => {
+          const boxCode = `P${unitNum}.${boxLetter}.${folder6}.${year}`;
+          keys.forEach(key => {
+            queryParams.push(JSON.stringify({ [key]: boxCode }));
+            containmentClauses.push(`r.row_data @> $${queryParams.length}`);
+          });
+        });
+        
         searchQuery = `
           SELECT 
             r.id, 
@@ -462,14 +471,10 @@ app.get('/api/search', async (req, res) => {
             r.row_data, 
             f.filename, 
             f.uploaded_at,
-            (CASE 
-              WHEN r.row_data::text ILIKE $1 THEN 100 
-              WHEN r.row_data::text ILIKE $2 THEN 50 
-              ELSE 0 
-            END) as relevance_score
+            100 as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
-          WHERE r.row_data::text ILIKE $1 OR r.row_data::text ILIKE $2
+          WHERE ${containmentClauses.join(' OR ')}
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
         `;
@@ -532,7 +537,53 @@ app.get('/api/search', async (req, res) => {
       }
     }
 
-    const searchRes = await pool.query(searchQuery, queryParams);
+    let searchRes = await pool.query(searchQuery, queryParams);
+    
+    // FALLBACK: If fast JSONB containment search returned 0 rows for standard box query
+    if (searchRes.rowCount === 0 && codeMatch) {
+      console.log(`[Search] Fast JSONB containment returned 0 rows for "${queryText}". Executing fallback ILIKE query...`);
+      const unitNum = codeMatch[1];
+      const boxLetter = codeMatch[2];
+      const folderNum = parseInt(codeMatch[3], 10);
+      const yearRaw = codeMatch[4];
+      const folder6 = String(folderNum).padStart(6, '0');
+      const folder5 = String(folderNum).padStart(5, '0');
+      
+      let yearPart = '';
+      if (yearRaw) {
+        const year = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
+        yearPart = '.' + year;
+      } else {
+        yearPart = '%';
+      }
+      
+      const pattern1 = `%P${unitNum}.${boxLetter}.${folder6}${yearPart}%`;
+      const pattern2_part1 = `%P${unitNum}%`;
+      const pattern2_part2 = `%${boxLetter}${folder5}${yearPart}%`;
+      
+      const fallbackParams = [pattern1, pattern2_part1, pattern2_part2];
+      const fallbackQuery = `
+        SELECT 
+          r.id, 
+          r.file_id, 
+          r.sheet_name, 
+          r.row_number, 
+          r.row_data, 
+          f.filename, 
+          f.uploaded_at,
+          (CASE 
+            WHEN r.row_data::text ILIKE $1 THEN 100 
+            WHEN r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3 THEN 50 
+            ELSE 0 
+          END) as relevance_score
+        FROM document_rows r
+        JOIN uploaded_files f ON r.file_id = f.id
+        WHERE r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)
+        ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
+        LIMIT 150;
+      `;
+      searchRes = await pool.query(fallbackQuery, fallbackParams);
+    }
     
     // Log search activity if it's a real query (not file preview)
     if (!fileId && queryText && queryText.trim() !== '') {
