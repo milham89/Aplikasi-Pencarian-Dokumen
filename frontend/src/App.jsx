@@ -74,6 +74,7 @@ function App() {
   
   const fileInputRef = useRef(null);
   const searchInputRef = useRef(null);
+  const searchAbortControllerRef = useRef(null);
 
   // Initial checks and loads
   useEffect(() => {
@@ -150,7 +151,7 @@ function App() {
 
     const timer = setTimeout(() => {
       handleSearch();
-    }, 300);
+    }, 600);
 
     return () => clearTimeout(timer);
   }, [searchQuery]);
@@ -241,10 +242,21 @@ function App() {
   // Execute Search
   const handleSearch = async () => {
     if (searchQuery.trim() === '') return;
+
+    // Abort previous search request if any
+    if (searchAbortControllerRef.current) {
+      searchAbortControllerRef.current.abort();
+    }
+
+    const controller = new AbortController();
+    searchAbortControllerRef.current = controller;
+
     setSearchUIState('loading');
     setSearchResults([]);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`, {
+        signal: controller.signal
+      });
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
@@ -261,6 +273,10 @@ function App() {
         setSearchUIState('empty');
       }
     } catch (err) {
+      if (err.name === 'AbortError') {
+        // Ignore aborted requests
+        return;
+      }
       console.error('Error searching:', err);
       setSearchUIState('empty');
     }
@@ -462,7 +478,7 @@ function App() {
     const tokens = [];
     baseTokens.forEach(t => {
       tokens.push(t);
-      const match = t.match(/^([a-zA-Z]+)(\d+)$/);
+      const match = t.match(/^([a-zA-Z]+)(0*[1-9]\d*)$/);
       if (match) {
         tokens.push(match[1]); // letters (e.g. A)
         tokens.push(match[2]); // digits (e.g. 001)

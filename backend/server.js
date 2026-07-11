@@ -491,7 +491,7 @@ app.get('/api/search', async (req, res) => {
         queryParams = [];
         
         searchTerms.forEach((term) => {
-          const match = term.match(/^([a-zA-Z]+)(\d+)$/);
+          const match = term.match(/^([a-zA-Z]+)(0*[1-9]\d*)$/);
           if (match) {
             const letters = match[1];
             const digits = match[2];
