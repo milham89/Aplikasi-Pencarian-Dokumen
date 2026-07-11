@@ -75,7 +75,7 @@ const initDatabase = async () => {
         id SERIAL PRIMARY KEY,
         filename VARCHAR(255) NOT NULL,
         sheet_names TEXT[] NOT NULL,
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         row_count INTEGER DEFAULT 0
       );
     `);
@@ -97,7 +97,7 @@ const initDatabase = async () => {
         id SERIAL PRIMARY KEY,
         activity_type VARCHAR(50) NOT NULL,
         activity_details TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
