@@ -461,11 +461,16 @@ app.get('/api/search', async (req, res) => {
             r.row_number, 
             r.row_data, 
             f.filename, 
-            f.uploaded_at
+            f.uploaded_at,
+            (CASE 
+              WHEN r.row_data::text ILIKE $1 THEN 100 
+              WHEN r.row_data::text ILIKE $2 THEN 50 
+              ELSE 0 
+            END) as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
           WHERE r.row_data::text ILIKE $1 OR r.row_data::text ILIKE $2
-          ORDER BY f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
+          ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
         `;
       } else {
@@ -477,6 +482,7 @@ app.get('/api/search', async (req, res) => {
         }
 
         const whereClauses = [];
+        const scoreExpressions = [];
         queryParams = [];
         
         searchTerms.forEach((term) => {
@@ -491,11 +497,21 @@ app.get('/api/search', async (req, res) => {
             const idxDigits = queryParams.length;
             
             whereClauses.push(`(r.row_data::text ILIKE $${idxTerm} OR (r.row_data::text ILIKE $${idxLetters} AND r.row_data::text ILIKE $${idxDigits}))`);
+            
+            // Give extra weight if the mixed token matches contiguously
+            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 20 ELSE 0 END)`);
           } else {
             queryParams.push(`%${term}%`);
-            whereClauses.push(`r.row_data::text ILIKE $${queryParams.length}`);
+            const idxTerm = queryParams.length;
+            whereClauses.push(`r.row_data::text ILIKE $${idxTerm}`);
+            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 10 ELSE 0 END)`);
           }
         });
+
+        // Add high boost if the entire query matches contiguously
+        queryParams.push(`%${queryText.trim()}%`);
+        const idxFullQuery = queryParams.length;
+        scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxFullQuery} THEN 100 ELSE 0 END)`);
 
         searchQuery = `
           SELECT 
@@ -505,11 +521,12 @@ app.get('/api/search', async (req, res) => {
             r.row_number, 
             r.row_data, 
             f.filename, 
-            f.uploaded_at
+            f.uploaded_at,
+            (${scoreExpressions.join(' + ')}) as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
           WHERE ${whereClauses.join(' AND ')}
-          ORDER BY f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
+          ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
         `;
       }
