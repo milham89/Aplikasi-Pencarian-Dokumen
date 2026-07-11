@@ -1,0 +1,1195 @@
+import React, { useState, useEffect, useRef } from 'react';
+import './App.css';
+
+const COLUMN_ALIASES = {
+  'DAFTAR PERTELAAN ARSIP': 'Kode Kopel',
+  'daftar pertelaan arsip': 'Kode Kopel',
+  'DAFTAR PERTELAAN ARSIP CENTRALFILE KANTOR PUSAT': 'Kode Kopel',
+  'daftar pertelaan arsip centralfile kantor pusat': 'Kode Kopel'
+};
+
+const getColumnLabel = (key) => {
+  if (!key) return '';
+  const trimmed = key.trim();
+  
+  // Rule-based check for "pertelaan arsip" variations (case-insensitive)
+  if (trimmed.toLowerCase().includes('pertelaan arsip')) {
+    return 'Kode Kopel';
+  }
+  
+  if (COLUMN_ALIASES[trimmed]) {
+    return COLUMN_ALIASES[trimmed];
+  }
+  return trimmed;
+};
+
+function App() {
+  // Navigation Tabs: 'search' | 'upload' | 'files'
+  const [activeTab, setActiveTab] = useState('search');
+  
+  // Database status
+  const [dbConnected, setDbConnected] = useState(false);
+  const [stats, setStats] = useState({ totalFiles: 0, totalRows: 0 });
+  
+  // Search state
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchUIState, setSearchUIState] = useState('loading'); // 'welcome' | 'preview' | 'loading' | 'results' | 'empty'
+  const [selectedFileId, setSelectedFileId] = useState(null); // Active file tab in results
+  
+  // Column visibility filter state (persisted in localStorage)
+  const [visibleColumnsOrder, setVisibleColumnsOrder] = useState(() => {
+    try {
+      const saved = localStorage.getItem('spreadsheet_visible_columns_order');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showColumnFilter, setShowColumnFilter] = useState(false);
+  const [columnSearchQuery, setColumnSearchQuery] = useState('');
+  
+  // Files state
+  const [filesList, setFilesList] = useState([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  
+  // Logs state
+  const [logs, setLogs] = useState([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+  const [logsError, setLogsError] = useState(null);
+  const [logSearch, setLogSearch] = useState('');
+  const [logPage, setLogPage] = useState(1);
+  const [logLimit, setLogLimit] = useState(50);
+  const [logTotal, setLogTotal] = useState(0);
+  const [logTotalPages, setLogTotalPages] = useState(1);
+  
+  // Upload state
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusMessage, setUploadStatusMessage] = useState('');
+  const [uploadSuccess, setUploadSuccess] = useState(null);
+  const [uploadError, setUploadError] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [copySuccess, setCopySuccess] = useState(false);
+  
+  const fileInputRef = useRef(null);
+  const searchInputRef = useRef(null);
+
+  // Initial checks and loads
+  useEffect(() => {
+    checkHealth();
+    fetchFiles();
+  }, []);
+
+  // Keyboard shortcut: focus search input on '/' key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === '/' && document.activeElement !== searchInputRef.current) {
+        e.preventDefault();
+        setActiveTab('search');
+        setTimeout(() => searchInputRef.current?.focus(), 50);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Close filter dropdown and reset search input when selected file changes
+  useEffect(() => {
+    setShowColumnFilter(false);
+    setColumnSearchQuery('');
+  }, [selectedFileId]);
+
+  // Save column visibility order changes to localStorage
+  useEffect(() => {
+    localStorage.setItem('spreadsheet_visible_columns_order', JSON.stringify(visibleColumnsOrder));
+  }, [visibleColumnsOrder]);
+
+  // Fetch logs when logs tab is selected, or when search/page/limit changes
+  useEffect(() => {
+    if (activeTab === 'logs') {
+      fetchLogs(logSearch, logPage, logLimit);
+    }
+  }, [activeTab, logPage, logLimit]);
+
+  // Debounce log search
+  useEffect(() => {
+    if (activeTab !== 'logs') return;
+    const timer = setTimeout(() => {
+      setLogPage(1);
+      fetchLogs(logSearch, 1, logLimit);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [logSearch]);
+
+  // Initial preview trigger when files list is first loaded
+  useEffect(() => {
+    if (searchQuery.trim() === '' && filesList.length > 0 && !selectedFileId) {
+      fetchFilePreview(filesList[0].id);
+    }
+  }, [filesList]);
+
+  // Debounced search trigger / Auto preview trigger
+  useEffect(() => {
+    if (searchQuery.trim() === '') {
+      if (filesList.length > 0) {
+        // If a file is already selected, keep it, otherwise select the first one
+        const activeId = selectedFileId && filesList.some(f => f.id === selectedFileId) 
+          ? selectedFileId 
+          : filesList[0].id;
+        fetchFilePreview(activeId);
+      } else {
+        setSearchResults([]);
+        setSelectedFileId(null);
+        setSearchUIState('welcome');
+      }
+      return;
+    }
+
+    setSearchUIState('loading');
+
+    const timer = setTimeout(() => {
+      handleSearch();
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Check backend & DB status
+  const checkHealth = async () => {
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      setDbConnected(data.status === 'ok' && data.database === 'connected');
+    } catch (err) {
+      setDbConnected(false);
+    }
+  };
+
+  // Get list of uploaded files
+  const fetchFiles = async () => {
+    setLoadingFiles(true);
+    try {
+      const res = await fetch('/api/files');
+      if (res.ok) {
+        const data = await res.json();
+        setFilesList(data.files);
+        
+        // Calculate statistics
+        const totalRows = data.files.reduce((sum, f) => sum + f.row_count, 0);
+        setStats({ totalFiles: data.files.length, totalRows });
+
+        if (data.files.length === 0) {
+          setSearchUIState('welcome');
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching files:', err);
+    } finally {
+      setLoadingFiles(false);
+    }
+  };
+
+  // Get paginated + searchable activity logs
+  const fetchLogs = async (q = logSearch, page = logPage, limit = logLimit) => {
+    setLoadingLogs(true);
+    setLogsError(null);
+    try {
+      const params = new URLSearchParams({ page, limit });
+      if (q) params.append('q', q);
+      const res = await fetch(`/api/logs?${params}`);
+      if (res.ok) {
+        const data = await res.json();
+        setLogs(data.logs || []);
+        setLogTotal(data.total || 0);
+        setLogTotalPages(data.totalPages || 1);
+      } else {
+        throw new Error('Gagal mengambil log');
+      }
+    } catch (err) {
+      console.error(err);
+      setLogsError(err.message);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
+  // Fetch and display a preview of a file (first 200 rows)
+  const fetchFilePreview = async (fileId) => {
+    setSearchUIState('loading');
+    setSearchResults([]);
+    try {
+      const res = await fetch(`/api/search?fileId=${fileId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(data.results);
+        if (data.results.length > 0) {
+          setSelectedFileId(fileId);
+          setSearchUIState('preview');
+        } else {
+          setSearchUIState('empty');
+        }
+      } else {
+        setSearchUIState('empty');
+      }
+    } catch (err) {
+      console.error('Error fetching file preview:', err);
+      setSearchUIState('empty');
+    }
+  };
+
+  // Execute Search
+  const handleSearch = async () => {
+    if (searchQuery.trim() === '') return;
+    setSearchUIState('loading');
+    setSearchResults([]);
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(data.results);
+        
+        // Auto select the first file in the search results to display it instantly
+        if (data.results.length > 0) {
+          setSelectedFileId(data.results[0].fileId);
+          setSearchUIState('results');
+        } else {
+          setSelectedFileId(null);
+          setSearchUIState('empty');
+        }
+      } else {
+        setSearchUIState('empty');
+      }
+    } catch (err) {
+      console.error('Error searching:', err);
+      setSearchUIState('empty');
+    }
+  };
+
+  // Handle file tab click
+  const handleFileTabClick = (fileId) => {
+    if (searchQuery.trim() === '') {
+      fetchFilePreview(fileId);
+    } else {
+      setSelectedFileId(fileId);
+    }
+  };
+
+  // Helper to check if a column is visible
+  const isColumnVisible = (colName) => {
+    if (visibleColumnsOrder.length === 0) return true;        // default: all visible
+    if (visibleColumnsOrder.includes('__all_hidden__')) return false; // sentinel: all hidden
+    return visibleColumnsOrder.includes(colName);
+  };
+
+  // Toggle column visibility with chronological sorting
+  const toggleColumnVisibility = (colName) => {
+    setVisibleColumnsOrder((prev) => {
+      // Coming from "all hidden" sentinel: start fresh with just the clicked column
+      if (prev.includes('__all_hidden__')) {
+        return [colName];
+      }
+
+      // Coming from default "all visible" state: initialize with all columns
+      let currentOrder = prev.length === 0
+        ? ['Sheet', 'Baris', ...activeHeaders]
+        : [...prev];
+      
+      if (currentOrder.includes(colName)) {
+        // Uncheck: remove column from list
+        return currentOrder.filter(c => c !== colName);
+      } else {
+        // Check: append column to the end of list (chronological order)
+        return [...currentOrder, colName];
+      }
+    });
+  };
+
+  // Select all columns to be visible in default activeHeaders order
+  const selectAllColumns = (headers) => {
+    setVisibleColumnsOrder(['Sheet', 'Baris', ...headers]);
+  };
+
+  // Clear all columns (including Sheet & Baris)
+  const clearAllColumns = () => {
+    setVisibleColumnsOrder(['__all_hidden__']);
+  };
+
+  // Helper to get headers in their selected order
+  const getOrderedColumns = () => {
+    if (visibleColumnsOrder.length === 0) {
+      return ['Sheet', 'Baris', ...activeHeaders];
+    }
+    return visibleColumnsOrder.filter(h => 
+      h === 'Sheet' || h === 'Baris' || activeHeaders.includes(h)
+    );
+  };
+
+  // Delete file
+  const handleDeleteFile = async (id, filename) => {
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus file "${filename}"? Semua data di dalamnya akan terhapus permanen dari aplikasi.`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        alert('File berhasil dihapus.');
+        setSelectedFileId(null);
+        fetchFiles();
+      } else {
+        const data = await res.json();
+        alert('Gagal menghapus file: ' + (data.error || 'Unknown error'));
+      }
+    } catch (err) {
+      alert('Error saat menghapus file: ' + err.message);
+    }
+  };
+
+  // Handle Drag-and-Drop events
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processFileUpload(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileChange = (e) => {
+    if (e.target.files && e.target.files[0]) {
+      processFileUpload(e.target.files[0]);
+    }
+  };
+
+  // Upload file logic with background job status polling
+  const processFileUpload = async (file) => {
+    const fileExt = file.name.split('.').pop().toLowerCase();
+    if (fileExt !== 'xlsx' && fileExt !== 'xls') {
+      setUploadError('Tipe file salah! Harap unggah file dengan format .xlsx atau .xls');
+      setUploadSuccess(null);
+      return;
+    }
+
+    setUploading(true);
+    setUploadProgress(10);
+    setUploadStatusMessage('Mengunggah berkas ke server...');
+    setUploadError(null);
+    setUploadSuccess(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      // 1. Initial POST request
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const uploadData = await res.json();
+      if (!res.ok) {
+        throw new Error(uploadData.error || 'Gagal mengunggah file.');
+      }
+
+      const jobId = uploadData.jobId;
+      setUploadProgress(20);
+      setUploadStatusMessage('Berkas terunggah. Memulai impor data...');
+
+      // 2. Poll status endpoint until completed or failed
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`/api/upload/status/${jobId}`);
+          if (!statusRes.ok) {
+            clearInterval(pollInterval);
+            setUploading(false);
+            setUploadError('Gagal memantau status impor.');
+            return;
+          }
+
+          const job = await statusRes.json();
+          setUploadProgress(job.progress);
+          setUploadStatusMessage(job.message);
+
+          if (job.status === 'completed') {
+            clearInterval(pollInterval);
+            setUploadSuccess(job.result);
+            setUploading(false);
+            
+            // Set newly uploaded file as active preview file
+            setSelectedFileId(job.result.fileId);
+            fetchFiles(); 
+          } else if (job.status === 'error') {
+            clearInterval(pollInterval);
+            setUploadError(job.error || 'Terjadi kesalahan saat memproses file.');
+            setUploading(false);
+          }
+        } catch (pollErr) {
+          clearInterval(pollInterval);
+          setUploading(false);
+          setUploadError('Terjadi kesalahan koneksi saat memantau status.');
+        }
+      }, 1000);
+
+    } catch (err) {
+      setUploading(false);
+      setUploadProgress(0);
+      setUploadError(err.message || 'Gagal menghubungi server.');
+    }
+  };
+
+  // Helper function to highlight query matches (token-based / Google-style)
+  const highlightText = (text, highlight) => {
+    if (text === null || text === undefined) return '';
+    const textStr = text.toString();
+    if (!highlight || highlight.trim() === '') return textStr;
+    
+    // Split highlight query into individual tokens (split by spaces or dots)
+    const baseTokens = highlight.trim().split(/[\s\.]+/).filter(Boolean);
+    if (baseTokens.length === 0) return textStr;
+
+    // Generate tokens, splitting mixed alphanumeric tokens (like A001 into A and 001) for partial highlights
+    const tokens = [];
+    baseTokens.forEach(t => {
+      tokens.push(t);
+      const match = t.match(/^([a-zA-Z]+)(\d+)$/);
+      if (match) {
+        tokens.push(match[1]); // letters (e.g. A)
+        tokens.push(match[2]); // digits (e.g. 001)
+      }
+    });
+    if (tokens.length === 0) return textStr;
+    
+    // Create a regex that matches any of the tokens
+    // Escape special characters for each token
+    const escapedTokens = tokens.map(t => t.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'));
+    const regexPattern = `(${escapedTokens.join('|')})`;
+    const regex = new RegExp(regexPattern, 'gi');
+    
+    const parts = textStr.split(regex);
+    
+    return (
+      <>
+        {parts.map((part, i) => 
+          regex.test(part) 
+            ? <mark key={i} className="highlight">{part}</mark> 
+            : part
+        )}
+      </>
+    );
+  };
+
+  // Copy visible table data to clipboard as TSV (paste-ready for Excel/Sheets)
+  const handleCopyData = (orderedDataHeaders, showSheet, showBaris) => {
+    if (!selectedFileData) return;
+    const headers = [
+      ...(showSheet ? ['Sheet'] : []),
+      ...(showBaris ? ['Baris'] : []),
+      ...orderedDataHeaders.map(h => getColumnLabel(h))
+    ];
+    const rows = selectedFileData.matches.map(match => [
+      ...(showSheet ? [match.sheetName] : []),
+      ...(showBaris ? [match.rowNumber] : []),
+      ...orderedDataHeaders.map(h => match.rowData[h] ?? '')
+    ]);
+    const tsv = [headers, ...rows]
+      .map(row => row.map(cell => String(cell).replace(/\t/g, ' ')).join('\t'))
+      .join('\n');
+    navigator.clipboard.writeText(tsv).then(() => {
+      setCopySuccess(true);
+      setTimeout(() => setCopySuccess(false), 2500);
+    });
+  };
+
+  // Open print-friendly window for the visible table
+  const handlePrint = (orderedDataHeaders, showSheet, showBaris) => {
+    if (!selectedFileData) return;
+    const headers = [
+      ...(showSheet ? ['Sheet'] : []),
+      ...(showBaris ? ['Baris'] : []),
+      ...orderedDataHeaders.map(h => getColumnLabel(h))
+    ];
+    const rows = selectedFileData.matches.map(match => [
+      ...(showSheet ? [match.sheetName] : []),
+      ...(showBaris ? [match.rowNumber] : []),
+      ...orderedDataHeaders.map(h => match.rowData[h] ?? '')
+    ]);
+    const tableHTML = `
+      <table border="1" cellspacing="0" cellpadding="6"
+        style="border-collapse:collapse;width:100%;font-size:11px;font-family:Arial,sans-serif">
+        <thead style="background:#e8eaf0">
+          <tr>${headers.map(h => `<th style="text-align:left;padding:6px 8px;border:1px solid #ccc">${h}</th>`).join('')}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row, ri) =>
+            `<tr style="background:${ri % 2 === 0 ? '#fff' : '#f5f7fb'}">
+              ${row.map(cell => `<td style="padding:5px 8px;border:1px solid #ddd">${cell ?? ''}</td>`).join('')}
+            </tr>`
+          ).join('')}
+        </tbody>
+      </table>`;
+    const win = window.open('', '_blank');
+    win.document.write(`<!DOCTYPE html><html><head>
+      <meta charset="UTF-8">
+      <title>Cetak Data — ${selectedFileData.filename}</title>
+      <style>
+        body { margin: 20px; font-family: Arial, sans-serif; color: #222; }
+        h2   { font-size: 14px; margin: 0 0 4px; }
+        p    { font-size: 11px; color: #666; margin: 0 0 14px; }
+        @media print { @page { margin: 1.5cm; size: landscape; } }
+      </style>
+      </head><body>
+      <h2>📁 ${selectedFileData.filename}</h2>
+      <p>${searchQuery.trim()
+        ? `Kata kunci: "${searchQuery}" · ${selectedFileData.matches.length} baris cocok`
+        : `Pratinjau · ${selectedFileData.matches.length} baris pertama`
+      }</p>
+      ${tableHTML}
+      <script>window.onload = () => { window.print(); }<\/script>
+      </body></html>`);
+    win.document.close();
+  };
+
+  // Find headers (keys) from all rows in the active file search results
+  const getActiveFileHeaders = () => {
+    const activeFile = searchResults.find(f => f.fileId === selectedFileId);
+    if (!activeFile || activeFile.matches.length === 0) return [];
+    
+    // Aggregate all keys from all matching rows
+    const allKeys = new Set();
+    activeFile.matches.forEach(m => {
+      Object.keys(m.rowData).forEach(key => allKeys.add(key));
+    });
+    
+    const headersArray = Array.from(allKeys);
+    
+    // Move pertelaan keys (Kode Kopel) to the very beginning (before Kolom_1)
+    const pertelaanHeaders = headersArray.filter(h => h.toLowerCase().includes('pertelaan arsip'));
+    const otherHeaders = headersArray.filter(h => !h.toLowerCase().includes('pertelaan arsip'));
+    
+    return [...pertelaanHeaders, ...otherHeaders];
+  };
+
+  const activeHeaders = getActiveFileHeaders();
+  const selectedFileData = searchResults.find(f => f.fileId === selectedFileId);
+
+  return (
+    <div className="app-container">
+      {/* Dynamic Header */}
+      <header className="app-header">
+        <div className="logo-section">
+          <div className="logo-icon">📊</div>
+          <div>
+            <h1>SpreadSheet Finder</h1>
+            <p className="subtitle">Cari data di seluruh dokumen Excel secara instan</p>
+          </div>
+        </div>
+        
+        {/* Status & Stats info */}
+        <div className="header-meta">
+          <div className="stats-badge">
+            <span className="stats-item">📁 <strong>{stats.totalFiles}</strong> File</span>
+            <span className="stats-divider">|</span>
+            <span className="stats-item">⚡ <strong>{stats.totalRows}</strong> Baris Data</span>
+          </div>
+          
+          <div className={`db-status-pill ${dbConnected ? 'connected' : 'disconnected'}`}>
+            <span className="dot"></span>
+            <span>{dbConnected ? 'Database Connected' : 'Database Offline'}</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Tab Navigation */}
+      <nav className="tab-navigation">
+        <button 
+          className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`}
+          onClick={() => setActiveTab('search')}
+        >
+          🔍 Pencarian Data
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
+          onClick={() => setActiveTab('upload')}
+        >
+          📤 Unggah Excel
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`}
+          onClick={() => setActiveTab('files')}
+        >
+          ⚙️ Kelola File ({filesList.length})
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`}
+          onClick={() => setActiveTab('logs')}
+        >
+          📜 Log Aktivitas
+        </button>
+      </nav>
+
+      {/* Main Content Area */}
+      <main className="main-content">
+        
+        {/* TAB 1: SEARCH */}
+        {activeTab === 'search' && (
+          <div className="search-tab-content">
+            <div className="search-bar-container">
+              <span className="search-icon">🔍</span>
+              <input
+                ref={searchInputRef}
+                type="text"
+                className="search-input"
+                placeholder="Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery && (
+                <button className="clear-btn" onClick={() => setSearchQuery('')}>✕</button>
+              )}
+            </div>
+
+            {searchUIState === 'loading' && (
+              <div className="search-loader">
+                <div className="spinner"></div>
+                <p>Mengambil data dari database...</p>
+              </div>
+            )}
+
+            {/* Results Rendering */}
+            {(searchUIState === 'preview' || searchUIState === 'results') && searchResults.length > 0 && (
+              <div className="results-container">
+                
+                {/* Left Side: Sidebar of files (either containing matches or all uploaded files if browse mode) */}
+                <div className="results-sidebar">
+                  <h3 className="section-title">
+                    {searchQuery.trim() === '' ? '📁 Daftar Dokumen' : '🎯 Dokumen Terkait'}
+                  </h3>
+                  <div className="file-tabs">
+                    {searchQuery.trim() === '' ? (
+                      filesList.map(file => (
+                        <button
+                          key={file.id}
+                          className={`file-tab-btn ${selectedFileId === file.id ? 'active' : ''}`}
+                          onClick={() => handleFileTabClick(file.id)}
+                        >
+                          <div className="file-tab-name">📄 {file.filename}</div>
+                          <div className="file-tab-badge">⚡ {file.row_count} baris</div>
+                        </button>
+                      ))
+                    ) : (
+                      searchResults.map(file => (
+                        <button
+                          key={file.fileId}
+                          className={`file-tab-btn ${selectedFileId === file.fileId ? 'active' : ''}`}
+                          onClick={() => handleFileTabClick(file.fileId)}
+                        >
+                          <div className="file-tab-name">📄 {file.filename}</div>
+                          <div className="file-tab-badge">{file.matches.length} baris cocok</div>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Right Side: Data table of the selected file */}
+                <div className="results-view">
+                  {selectedFileData && (
+                    <div className="results-card">
+                      <div className="results-card-header">
+                        <div>
+                          <h2>📁 {selectedFileData.filename}</h2>
+                          <p className="file-meta-date">
+                            {searchQuery.trim() === '' 
+                              ? `Mode Pratinjau (Menampilkan 200 baris pertama) • Diunggah: ${new Date(selectedFileData.uploadedAt).toLocaleString('id-ID')}`
+                              : `Hasil Pencarian • Diunggah: ${new Date(selectedFileData.uploadedAt).toLocaleString('id-ID')}`
+                            }
+                          </p>
+                        </div>
+
+                        {/* Column Filter Toggle Button */}
+                        <div className="column-filter-container">
+                          <button 
+                            className="column-filter-trigger-btn"
+                            onClick={() => {
+                              setShowColumnFilter(!showColumnFilter);
+                              if (showColumnFilter) setColumnSearchQuery('');
+                            }}
+                          >
+                            ⚙️ Pilih Kolom
+                          </button>
+                          
+                          {showColumnFilter && (
+                            <div className="column-filter-dropdown">
+                              <div className="column-search-wrapper">
+                                <input
+                                  type="text"
+                                  className="column-search-input"
+                                  placeholder="Cari nama kolom..."
+                                  value={columnSearchQuery}
+                                  onChange={(e) => setColumnSearchQuery(e.target.value)}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                {columnSearchQuery && (
+                                  <button 
+                                    className="column-search-clear-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setColumnSearchQuery('');
+                                    }}
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
+                              <div className="dropdown-actions">
+                                <button className="dropdown-action-btn" onClick={() => { selectAllColumns(activeHeaders); setShowColumnFilter(false); }}>Tampilkan Semua</button>
+                                <button className="dropdown-action-btn" onClick={() => { clearAllColumns(activeHeaders); setShowColumnFilter(false); }}>Sembunyikan Semua</button>
+                              </div>
+                              <div className="dropdown-items">
+                                {['Sheet', 'Baris']
+                                  .filter(h => h.toLowerCase().includes(columnSearchQuery.toLowerCase()))
+                                  .map(h => (
+                                    <label key={h} className="column-checkbox-label meta-checkbox">
+                                      <input
+                                        type="checkbox"
+                                        checked={isColumnVisible(h)}
+                                        onChange={() => toggleColumnVisibility(h)}
+                                      />
+                                      <strong>{h}</strong>
+                                    </label>
+                                  ))}
+                                {['Sheet', 'Baris'].filter(h => h.toLowerCase().includes(columnSearchQuery.toLowerCase())).length > 0 &&
+                                 activeHeaders.filter(h => getColumnLabel(h).toLowerCase().includes(columnSearchQuery.toLowerCase())).length > 0 && (
+                                  <div className="dropdown-divider"></div>
+                                )}
+                                {activeHeaders
+                                  .filter(h => getColumnLabel(h).toLowerCase().includes(columnSearchQuery.toLowerCase()))
+                                  .map(h => (
+                                    <label key={h} className="column-checkbox-label">
+                                      <input
+                                        type="checkbox"
+                                        checked={isColumnVisible(h)}
+                                        onChange={() => toggleColumnVisibility(h)}
+                                      />
+                                      <span>{getColumnLabel(h)}</span>
+                                    </label>
+                                  ))}
+                                {['Sheet', 'Baris'].filter(h => h.toLowerCase().includes(columnSearchQuery.toLowerCase())).length === 0 &&
+                                 activeHeaders.filter(h => getColumnLabel(h).toLowerCase().includes(columnSearchQuery.toLowerCase())).length === 0 && (
+                                  <div className="dropdown-no-results">Kolom tidak ditemukan</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {(() => {
+                        const orderedDataHeaders = visibleColumnsOrder.length === 0
+                          ? activeHeaders
+                          : visibleColumnsOrder.filter(h => h !== 'Sheet' && h !== 'Baris' && activeHeaders.includes(h));
+
+                        const showSheet = isColumnVisible('Sheet');
+                        const showBaris = isColumnVisible('Baris');
+                        const noColumnsVisible = !showSheet && !showBaris && orderedDataHeaders.length === 0;
+
+                        if (noColumnsVisible) {
+                          return (
+                            <div className="no-columns-state">
+                              <div className="no-columns-icon">👁️</div>
+                              <p>Semua kolom disembunyikan.<br/>Klik <strong>⚙️ Pilih Kolom</strong> lalu <strong>Tampilkan Semua</strong> untuk menampilkan data.</p>
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <>
+                            {/* Action buttons: Copy + Print */}
+                            <div className="table-action-bar">
+                              <button
+                                className={`table-action-btn ${copySuccess ? 'success' : ''}`}
+                                onClick={() => handleCopyData(orderedDataHeaders, showSheet, showBaris)}
+                                title="Salin data ke clipboard (format TSV, bisa ditempel ke Excel)"
+                              >
+                                {copySuccess ? '✅ Tersalin!' : '📋 Salin Data'}
+                              </button>
+                              <button
+                                className="table-action-btn"
+                                onClick={() => handlePrint(orderedDataHeaders, showSheet, showBaris)}
+                                title="Buka jendela cetak"
+                              >
+                                🖨️ Cetak
+                              </button>
+                              <span className="table-row-count">
+                                {selectedFileData.matches.length} baris
+                              </span>
+                            </div>
+                            <div className="table-responsive">
+                              <table className="excel-table">
+                                <thead>
+                                  <tr>
+                                    {showSheet && <th>Sheet</th>}
+                                    {showBaris && <th>Baris</th>}
+                                    {orderedDataHeaders.map(h => (
+                                      <th key={h}>{getColumnLabel(h)}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {selectedFileData.matches.map(match => (
+                                    <tr key={match.id}>
+                                      {showSheet && (
+                                        <td className="meta-cell font-accent">{match.sheetName}</td>
+                                      )}
+                                      {showBaris && (
+                                        <td className="meta-cell text-center">{match.rowNumber}</td>
+                                      )}
+                                      {orderedDataHeaders.map(h => {
+                                        const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
+                                        return (
+                                          <td key={h} className={isDesc ? 'description-cell' : ''}>
+                                            {highlightText(match.rowData[h], searchQuery)}
+                                          </td>
+                                        );
+                                      })}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            )}
+
+            {/* Empty and Neutral States */}
+            {searchUIState === 'empty' && (
+              <div className="empty-state">
+                <div className="empty-icon">🤷‍♂️</div>
+                <h3>Tidak ada data yang cocok</h3>
+                <p>Coba gunakan kata kunci lain atau unggah dokumen Excel baru yang relevan.</p>
+              </div>
+            )}
+
+            {searchUIState === 'welcome' && (
+              <div className="empty-state welcome-state">
+                <div className="welcome-glow-icon">🔍</div>
+                <h3>Pencarian Data Global</h3>
+                <p>Masukkan kata kunci untuk mencari data atau unggah dokumen Excel terlebih dahulu di tab <strong>Unggah Excel</strong>.</p>
+                <div className="welcome-shortcuts">
+                  <div className="shortcut-card">
+                    <span className="shortcut-key">/</span>
+                    <span className="shortcut-desc">Fokus ke Input Pencarian</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 2: UPLOAD */}
+        {activeTab === 'upload' && (
+          <div className="upload-tab-content">
+            <div className="upload-container">
+              <h2>Unggah Dokumen Excel Baru</h2>
+              <p className="upload-description">
+                Unggah spreadsheet Excel Anda (`.xlsx` atau `.xls`). Sistem akan membaca dan mengindeks setiap baris secara dinamis ke dalam database agar siap dicari.
+              </p>
+
+              {/* Drag and Drop Zone */}
+              <div
+                className={`dropzone ${dragActive ? 'active' : ''} ${uploading ? 'disabled' : ''}`}
+                onDragEnter={handleDrag}
+                onDragOver={handleDrag}
+                onDragLeave={handleDrag}
+                onDrop={handleDrop}
+                onClick={() => !uploading && fileInputRef.current.click()}
+              >
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="file-input"
+                  accept=".xlsx, .xls"
+                  onChange={handleFileChange}
+                  disabled={uploading}
+                />
+                <div className="dropzone-content">
+                  <div className="dropzone-icon">📥</div>
+                  {uploading ? (
+                    <div className="uploading-state">
+                      <p className="upload-status-text">{uploadStatusMessage}</p>
+                      <div className="progress-bar-container">
+                        <div className="progress-bar" style={{ width: `${uploadProgress}%` }}></div>
+                      </div>
+                      <span className="progress-text">{uploadProgress}%</span>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="main-drop-text">Seret & taruh file Excel di sini, atau <strong>klik untuk memilih</strong></p>
+                      <p className="sub-drop-text">Mendukung format file .xlsx dan .xls (Maksimal 200MB)</p>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Success Notification */}
+              {uploadSuccess && (
+                <div className="notification success">
+                  <div className="notification-icon">✅</div>
+                  <div className="notification-body">
+                    <h4>Impor Berhasil!</h4>
+                    <p>File "{uploadSuccess.filename}" telah berhasil diproses di database.</p>
+                    <div className="success-details">
+                      <span>Sheet diproses: <strong>{uploadSuccess.sheetsProcessed}</strong></span>
+                      <span>Baris diimpor: <strong>{uploadSuccess.rowsInserted.toLocaleString('id-ID')}</strong></span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Error Notification */}
+              {uploadError && (
+                <div className="notification error">
+                  <div className="notification-icon">⚠️</div>
+                  <div className="notification-body">
+                    <h4>Impor Gagal</h4>
+                    <p>{uploadError}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 3: MANAGE FILES */}
+        {activeTab === 'files' && (
+          <div className="files-tab-content">
+            <div className="files-header">
+              <h2>Dokumen Terdaftar</h2>
+              <p>Kelola file spreadsheet yang datanya saat ini aktif di dalam mesin pencari.</p>
+            </div>
+
+            {loadingFiles ? (
+              <div className="search-loader">
+                <div className="spinner"></div>
+                <p>Mengambil daftar file...</p>
+              </div>
+            ) : filesList.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">📁</div>
+                <h3>Belum ada file terdaftar</h3>
+                <p>Silakan buka tab <strong>Unggah Excel</strong> untuk mengimpor file pertama Anda.</p>
+              </div>
+            ) : (
+              <div className="files-grid">
+                {filesList.map(file => (
+                  <div key={file.id} className="file-card">
+                    <div className="file-card-details">
+                      <h3 className="file-card-title">📄 {file.filename}</h3>
+                      <div className="file-card-meta">
+                        <span className="meta-tag blue">⚡ {file.row_count} baris</span>
+                        <span className="meta-tag purple">📁 {file.sheet_names.length} sheet</span>
+                      </div>
+                      <p className="file-card-sheets">
+                        <strong>Sheets:</strong> {file.sheet_names.join(', ')}
+                      </p>
+                      <p className="file-card-date">
+                        Diunggah: {new Date(file.uploaded_at).toLocaleString('id-ID')}
+                      </p>
+                    </div>
+                    <button 
+                      className="delete-file-btn" 
+                      onClick={() => handleDeleteFile(file.id, file.filename)}
+                      title="Hapus file dan seluruh datanya"
+                    >
+                      🗑️ Hapus
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 4: ACTIVITY LOGS */}
+        {activeTab === 'logs' && (
+          <div className="logs-tab-content">
+            {/* Header row */}
+            <div className="section-header-row">
+              <div>
+                <h2>📜 Log Aktivitas Sistem</h2>
+                <p className="subtitle">Riwayat audit pengunggahan, pencarian, dan penghapusan berkas.</p>
+              </div>
+              <button className="btn btn-secondary" onClick={() => fetchLogs(logSearch, logPage, logLimit)} disabled={loadingLogs}>
+                {loadingLogs ? 'Memuat...' : '🔄 Segarkan'}
+              </button>
+            </div>
+
+            {/* Search + Per-page controls */}
+            <div className="logs-controls">
+              <div className="logs-search-wrapper">
+                <span className="logs-search-icon">🔍</span>
+                <input
+                  type="text"
+                  className="logs-search-input"
+                  placeholder="Cari aktivitas, kata kunci, tipe..."
+                  value={logSearch}
+                  onChange={e => setLogSearch(e.target.value)}
+                />
+                {logSearch && (
+                  <button className="logs-search-clear" onClick={() => setLogSearch('')}>✕</button>
+                )}
+              </div>
+              <div className="logs-per-page">
+                <label>Tampilkan</label>
+                <select
+                  value={logLimit}
+                  onChange={e => { setLogLimit(Number(e.target.value)); setLogPage(1); }}
+                >
+                  <option value={10}>10</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={200}>200</option>
+                  <option value={500}>500</option>
+                </select>
+                <label>data per halaman</label>
+              </div>
+            </div>
+
+            {/* Info bar */}
+            {!loadingLogs && !logsError && logs.length > 0 && (
+              <div className="logs-info-bar">
+                Menampilkan <strong>{((logPage - 1) * logLimit) + 1}–{Math.min(logPage * logLimit, logTotal)}</strong> dari <strong>{logTotal.toLocaleString('id-ID')}</strong> aktivitas
+                {logSearch && <span> · Filter: "<em>{logSearch}</em>"</span>}
+              </div>
+            )}
+
+            {logsError && (
+              <div className="error-status">⚠️ Error: {logsError}</div>
+            )}
+
+            {loadingLogs ? (
+              <div className="search-loader">
+                <div className="spinner"></div>
+                <p>Memuat riwayat log...</p>
+              </div>
+            ) : logs.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">📜</div>
+                <h3>{logSearch ? 'Tidak ada log yang cocok' : 'Belum ada log aktivitas'}</h3>
+                <p>{logSearch ? `Tidak ditemukan aktivitas dengan kata kunci "${logSearch}".` : 'Aktivitas sistem Anda akan tercatat di sini.'}</p>
+              </div>
+            ) : (
+              <>
+                <div className="table-responsive">
+                  <table className="excel-table logs-table">
+                    <thead>
+                      <tr>
+                        <th>Waktu Kejadian</th>
+                        <th>Tipe Aktivitas</th>
+                        <th>Detail Aktivitas</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {logs.map(log => {
+                        let tagClass = 'tag-secondary';
+                        if (log.activity_type === 'upload') tagClass = 'tag-success';
+                        if (log.activity_type === 'delete') tagClass = 'tag-danger';
+                        if (log.activity_type === 'search') tagClass = 'tag-info';
+                        return (
+                          <tr key={log.id}>
+                            <td className="meta-cell text-center" style={{ width: '180px' }}>
+                              {new Date(log.created_at).toLocaleString('id-ID')}
+                            </td>
+                            <td className="text-center" style={{ width: '120px' }}>
+                              <span className={`activity-tag ${tagClass}`}>
+                                {log.activity_type.toUpperCase()}
+                              </span>
+                            </td>
+                            <td className="description-cell">{log.activity_details}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination controls */}
+                {logTotalPages > 1 && (
+                  <div className="logs-pagination">
+                    <button
+                      className="page-btn"
+                      onClick={() => setLogPage(1)}
+                      disabled={logPage === 1}
+                    >«</button>
+                    <button
+                      className="page-btn"
+                      onClick={() => setLogPage(p => Math.max(1, p - 1))}
+                      disabled={logPage === 1}
+                    >‹ Sebelumnya</button>
+
+                    {/* Page number pills */}
+                    {Array.from({ length: logTotalPages }, (_, i) => i + 1)
+                      .filter(p => p === 1 || p === logTotalPages || Math.abs(p - logPage) <= 2)
+                      .reduce((acc, p, idx, arr) => {
+                        if (idx > 0 && p - arr[idx - 1] > 1) acc.push('...');
+                        acc.push(p);
+                        return acc;
+                      }, [])
+                      .map((p, idx) =>
+                        p === '...' ? (
+                          <span key={`dots-${idx}`} className="page-dots">…</span>
+                        ) : (
+                          <button
+                            key={p}
+                            className={`page-btn ${logPage === p ? 'active' : ''}`}
+                            onClick={() => setLogPage(p)}
+                          >{p}</button>
+                        )
+                      )
+                    }
+
+                    <button
+                      className="page-btn"
+                      onClick={() => setLogPage(p => Math.min(logTotalPages, p + 1))}
+                      disabled={logPage === logTotalPages}
+                    >Berikutnya ›</button>
+                    <button
+                      className="page-btn"
+                      onClick={() => setLogPage(logTotalPages)}
+                      disabled={logPage === logTotalPages}
+                    >»</button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+      </main>
+      
+      <footer className="app-footer-bar">
+        <p>© 2026 SpreadSheet Finder — Didukung oleh React, Express, dan PostgreSQL</p>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
