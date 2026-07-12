@@ -1680,4 +1680,40 @@ body.light-mode .section-header-row h2 {
   color: var(--text-primary);
 }
 
+/* Light mode overrides for column filter dropdown */
+body.light-mode .column-filter-dropdown {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  box-shadow: 0 10px 30px var(--glass-shadow);
+}
 
+body.light-mode .column-search-input {
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.03);
+  border-color: var(--glass-border);
+}
+
+body.light-mode .dropdown-action-btn {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: var(--glass-border);
+  color: var(--text-secondary);
+}
+
+body.light-mode .dropdown-action-btn:hover {
+  background: rgba(59, 130, 246, 0.1);
+  color: var(--accent-primary);
+  border-color: rgba(59, 130, 246, 0.3);
+}
+
+body.light-mode .column-checkbox-label {
+  color: var(--text-secondary);
+}
+
+body.light-mode .column-checkbox-label:hover {
+  background: rgba(0, 0, 0, 0.03);
+  color: var(--text-primary);
+}
+
+body.light-mode .column-checkbox-label.meta-checkbox {
+  color: var(--accent-secondary);
+}
