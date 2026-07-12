@@ -84,6 +84,18 @@ function App() {
   });
   const [showColumnFilter, setShowColumnFilter] = useState(false);
   const [columnSearchQuery, setColumnSearchQuery] = useState('');
+
+  // Bookmark Column visibility filter state
+  const [bookmarkVisibleColumns, setBookmarkVisibleColumns] = useState(() => {
+    try {
+      const saved = localStorage.getItem('spreadsheet_bookmark_visible_columns');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showBookmarkColumnFilter, setShowBookmarkColumnFilter] = useState(false);
+  const [bookmarkColumnSearchQuery, setBookmarkColumnSearchQuery] = useState('');
   
   // Files state
   const [filesList, setFilesList] = useState([]);
@@ -161,6 +173,11 @@ function App() {
   useEffect(() => {
     localStorage.setItem('spreadsheet_visible_columns_order', JSON.stringify(visibleColumnsOrder));
   }, [visibleColumnsOrder]);
+
+  // Save bookmark column visibility changes to localStorage
+  useEffect(() => {
+    localStorage.setItem('spreadsheet_bookmark_visible_columns', JSON.stringify(bookmarkVisibleColumns));
+  }, [bookmarkVisibleColumns]);
 
   // Fetch logs when logs tab is selected, or when search/page/limit changes
   useEffect(() => {
@@ -500,6 +517,40 @@ function App() {
   // Clear all columns (including Sheet & Baris)
   const clearAllColumns = () => {
     setVisibleColumnsOrder(['__all_hidden__']);
+  };
+
+  // Helper to check if a bookmark column is visible
+  const isBookmarkColumnVisible = (colName) => {
+    if (bookmarkVisibleColumns.length === 0) return true;
+    if (bookmarkVisibleColumns.includes('__all_hidden__')) return false;
+    return bookmarkVisibleColumns.includes(colName);
+  };
+
+  // Toggle bookmark column visibility
+  const toggleBookmarkColumnVisibility = (colName, headers) => {
+    setBookmarkVisibleColumns((prev) => {
+      if (prev.includes('__all_hidden__')) {
+        return [colName];
+      }
+      let currentOrder = prev.length === 0
+        ? ['File', 'Sheet', 'Baris', ...headers]
+        : [...prev];
+      if (currentOrder.includes(colName)) {
+        return currentOrder.filter(c => c !== colName);
+      } else {
+        return [...currentOrder, colName];
+      }
+    });
+  };
+
+  // Select all columns for bookmarks
+  const selectBookmarkAllColumns = (headers) => {
+    setBookmarkVisibleColumns(['File', 'Sheet', 'Baris', ...headers]);
+  };
+
+  // Clear all columns for bookmarks
+  const clearBookmarkAllColumns = () => {
+    setBookmarkVisibleColumns(['__all_hidden__']);
   };
 
   // Helper to get headers in their selected order
@@ -1343,105 +1394,232 @@ function App() {
                   });
                   const bookmarkedHeaders = Array.from(allKeys);
                   
+                  const orderedBookmarkHeaders = bookmarkVisibleColumns.length === 0
+                    ? bookmarkedHeaders
+                    : bookmarkVisibleColumns.filter(h => h !== 'File' && h !== 'Sheet' && h !== 'Baris' && bookmarkedHeaders.includes(h));
+
+                  const showFile = isBookmarkColumnVisible('File');
+                  const showSheet = isBookmarkColumnVisible('Sheet');
+                  const showBaris = isBookmarkColumnVisible('Baris');
+                  const noColumnsVisible = !showFile && !showSheet && !showBaris && orderedBookmarkHeaders.length === 0;
+
                   return (
                     <>
-                      {/* Action buttons */}
-                      <div className="table-action-bar">
-                        <button
-                          className="table-action-btn table-action-btn--export"
-                          onClick={() => {
-                            const headers = ['File', 'Sheet', 'Baris', ...bookmarkedHeaders.map(h => getColumnLabel(h))];
-                            const rows = bookmarksList.map(m => [
-                              m.filename,
-                              m.sheet_name,
-                              m.row_number,
-                              ...bookmarkedHeaders.map(h => m.row_data[h] ?? '')
-                            ]);
-                            const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
-                            const wb = XLSX.utils.book_new();
-                            XLSX.utils.book_append_sheet(wb, ws, 'Bookmarks');
-                            XLSX.writeFile(wb, `Bookmarks-${new Date().toLocaleDateString('id-ID').replace(/\//g, '-')}.xlsx`);
-                            showToast('📥 Berhasil Diekspor!', 'Bookmarks disimpan ke Excel.', 'success');
-                          }}
-                          title="Unduh seluruh bookmark ke Excel"
-                        >
-                          📥 Ekspor Excel ({bookmarksList.length})
-                        </button>
-                        <button
-                          className="table-action-btn"
-                          onClick={() => {
-                            const headers = ['File', 'Sheet', 'Baris', ...bookmarkedHeaders.map(h => getColumnLabel(h))];
-                            const rows = bookmarksList.map(m => [
-                              m.filename,
-                              m.sheet_name,
-                              m.row_number,
-                              ...bookmarkedHeaders.map(h => m.row_data[h] ?? '')
-                            ]);
-                            const tableHTML = `
-                              <table border="1" cellspacing="0" cellpadding="6"
-                                style="border-collapse:collapse;width:100%;font-size:10px;font-family:Arial,sans-serif">
-                                <thead style="background:#e8eaf0">
-                                  <tr>${headers.map(h => `<th style="text-align:left">${h}</th>`).join('')}</tr>
-                                </thead>
-                                <tbody>
-                                  ${rows.map((row, ri) =>
-                                    `<tr style="background:${ri % 2 === 0 ? '#fff' : '#f5f7fb'}">
-                                      ${row.map(cell => `<td>${cell ?? ''}</td>`).join('')}
-                                    </tr>`
-                                  ).join('')}
-                                </tbody>
-                              </table>`;
-                            const win = window.open('', '_blank');
-                            win.document.write(`<!DOCTYPE html><html><head><title>Bookmarks Cetak</title></head><body onload="window.print()">${tableHTML}</body></html>`);
-                            win.document.close();
-                          }}
-                        >
-                          🖨️ Cetak
-                        </button>
-                        <span className="table-row-count">{bookmarksList.length} baris tersimpan</span>
+                      <div className="results-card-header" style={{ marginBottom: '1.25rem' }}>
+                        <div>
+                          <h3 style={{ margin: 0, fontSize: '1.1rem' }}>📋 Filter & Tampilan Bookmark</h3>
+                          <p style={{ margin: '4px 0 0', fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                            Sesuaikan kolom apa saja yang ingin ditampilkan di tabel bookmark Anda.
+                          </p>
+                        </div>
+                        
+                        {/* Bookmark Column Filter Toggle Button */}
+                        <div className="column-filter-container">
+                          <button 
+                            className={`column-filter-trigger-btn ${showBookmarkColumnFilter ? 'active' : ''}`}
+                            onClick={() => {
+                              setShowBookmarkColumnFilter(!showBookmarkColumnFilter);
+                              if (showBookmarkColumnFilter) setBookmarkColumnSearchQuery('');
+                            }}
+                          >
+                            {showBookmarkColumnFilter ? '✕ Tutup Pilihan' : '⚙️ Pilih Kolom'}
+                          </button>
+                          
+                          {showBookmarkColumnFilter && (
+                            <div className="column-filter-dropdown">
+                              <div className="column-search-wrapper">
+                                <input
+                                  type="text"
+                                  className="column-search-input"
+                                  placeholder="Cari nama kolom..."
+                                  value={bookmarkColumnSearchQuery}
+                                  onChange={(e) => setBookmarkColumnSearchQuery(e.target.value)}
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                                {bookmarkColumnSearchQuery && (
+                                  <button 
+                                    className="column-search-clear-btn"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setBookmarkColumnSearchQuery('');
+                                    }}
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
+                              <div className="dropdown-actions">
+                                <button className="dropdown-action-btn" onClick={() => { selectBookmarkAllColumns(bookmarkedHeaders); setShowBookmarkColumnFilter(false); }}>Tampilkan Semua</button>
+                                <button className="dropdown-action-btn" onClick={() => { clearBookmarkAllColumns(); setShowBookmarkColumnFilter(false); }}>Sembunyikan Semua</button>
+                                <button className="dropdown-action-btn dropdown-action-btn--close" onClick={() => setShowBookmarkColumnFilter(false)}>✕ Tutup</button>
+                              </div>
+                              <div className="dropdown-items">
+                                {['File', 'Sheet', 'Baris']
+                                  .filter(h => h.toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase()))
+                                  .map(h => (
+                                    <label key={h} className="column-checkbox-label meta-checkbox">
+                                      <input
+                                        type="checkbox"
+                                        checked={isBookmarkColumnVisible(h)}
+                                        onChange={() => toggleBookmarkColumnVisibility(h, bookmarkedHeaders)}
+                                      />
+                                      <strong>{h}</strong>
+                                    </label>
+                                  ))}
+                                {['File', 'Sheet', 'Baris'].filter(h => h.toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase())).length > 0 &&
+                                 bookmarkedHeaders.filter(h => getColumnLabel(h).toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase())).length > 0 && (
+                                  <div className="dropdown-divider"></div>
+                                )}
+                                {bookmarkedHeaders
+                                  .filter(h => getColumnLabel(h).toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase()))
+                                  .map(h => (
+                                    <label key={h} className="column-checkbox-label">
+                                      <input
+                                        type="checkbox"
+                                        checked={isBookmarkColumnVisible(h)}
+                                        onChange={() => toggleBookmarkColumnVisibility(h, bookmarkedHeaders)}
+                                      />
+                                      <span>{getColumnLabel(h)}</span>
+                                    </label>
+                                  ))}
+                                {['File', 'Sheet', 'Baris'].filter(h => h.toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase())).length === 0 &&
+                                 bookmarkedHeaders.filter(h => getColumnLabel(h).toLowerCase().includes(bookmarkColumnSearchQuery.toLowerCase())).length === 0 && (
+                                  <div className="dropdown-no-results">Kolom tidak ditemukan</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
                       </div>
 
-                      <div className="table-responsive">
-                        <table className="excel-table">
-                          <thead>
-                            <tr>
-                              <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
-                              <th>Nama Berkas</th>
-                              <th>Sheet</th>
-                              <th>Baris</th>
-                              {bookmarkedHeaders.map(h => (
-                                <th key={h}>{getColumnLabel(h)}</th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {bookmarksList.map(match => (
-                              <tr key={match.id}>
-                                <td className="meta-cell text-center" style={{ width: '40px' }}>
-                                  <button
-                                    className="bookmark-star-btn active"
-                                    onClick={() => handleToggleBookmark(match.id, true)}
-                                    title="Hapus dari Bookmark"
-                                  >
-                                    ★
-                                  </button>
-                                </td>
-                                <td className="meta-cell font-accent">{match.filename}</td>
-                                <td className="meta-cell">{match.sheet_name}</td>
-                                <td className="meta-cell text-center">{match.row_number}</td>
-                                {bookmarkedHeaders.map(h => {
-                                  const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
-                                  return (
-                                    <td key={h} className={isDesc ? 'description-cell' : ''}>
-                                      {match.row_data[h] ?? ''}
+                      {/* Bookmark Column Filter Active Info Bar */}
+                      {bookmarkVisibleColumns.length > 0 && !bookmarkVisibleColumns.includes('__all_hidden__') && (
+                        <div className="active-filter-bar" style={{ marginBottom: '1rem' }}>
+                          <span className="active-filter-text">
+                            ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan { (showFile ? 1 : 0) + (showSheet ? 1 : 0) + (showBaris ? 1 : 0) + orderedBookmarkHeaders.length } dari { bookmarkedHeaders.length + 3 } kolom.
+                          </span>
+                          <button className="reset-filter-link-btn" onClick={() => setBookmarkVisibleColumns([])}>
+                            ✕ Reset Filter Kolom
+                          </button>
+                        </div>
+                      )}
+
+                      {noColumnsVisible ? (
+                        <div className="no-columns-state">
+                          <div className="no-columns-icon">👁️</div>
+                          <p>Semua kolom disembunyikan.<br/>Klik <strong>⚙️ Pilih Kolom</strong> lalu <strong>Tampilkan Semua</strong> untuk menampilkan data bookmark.</p>
+                        </div>
+                      ) : (
+                        <>
+                          {/* Action buttons */}
+                          <div className="table-action-bar">
+                            <button
+                              className="table-action-btn table-action-btn--export"
+                              onClick={() => {
+                                const headers = [
+                                  ...(showFile ? ['File'] : []),
+                                  ...(showSheet ? ['Sheet'] : []),
+                                  ...(showBaris ? ['Baris'] : []),
+                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h))
+                                ];
+                                const rows = bookmarksList.map(m => [
+                                  ...(showFile ? [m.filename] : []),
+                                  ...(showSheet ? [m.sheet_name] : []),
+                                  ...(showBaris ? [m.row_number] : []),
+                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? '')
+                                ]);
+                                const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+                                const wb = XLSX.utils.book_new();
+                                XLSX.utils.book_append_sheet(wb, ws, 'Bookmarks');
+                                XLSX.writeFile(wb, `Bookmarks-${new Date().toLocaleDateString('id-ID').replace(/\//g, '-')}.xlsx`);
+                                showToast('📥 Berhasil Diekspor!', 'Bookmarks disimpan ke Excel.', 'success');
+                              }}
+                              title="Unduh seluruh bookmark ke Excel"
+                            >
+                              📥 Ekspor Excel ({bookmarksList.length})
+                            </button>
+                            <button
+                              className="table-action-btn"
+                              onClick={() => {
+                                const headers = [
+                                  ...(showFile ? ['File'] : []),
+                                  ...(showSheet ? ['Sheet'] : []),
+                                  ...(showBaris ? ['Baris'] : []),
+                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h))
+                                ];
+                                const rows = bookmarksList.map(m => [
+                                  ...(showFile ? [m.filename] : []),
+                                  ...(showSheet ? [m.sheet_name] : []),
+                                  ...(showBaris ? [m.row_number] : []),
+                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? '')
+                                ]);
+                                const tableHTML = `
+                                  <table border="1" cellspacing="0" cellpadding="6"
+                                    style="border-collapse:collapse;width:100%;font-size:10px;font-family:Arial,sans-serif">
+                                    <thead style="background:#e8eaf0">
+                                      <tr>${headers.map(h => `<th style="text-align:left;padding:6px;border:1px solid #ccc">${h}</th>`).join('')}</tr>
+                                    </thead>
+                                    <tbody>
+                                      ${rows.map((row, ri) =>
+                                        `<tr style="background:${ri % 2 === 0 ? '#fff' : '#f5f7fb'}">
+                                          ${row.map(cell => `<td style="padding:5px;border:1px solid #ddd">${cell ?? ''}</td>`).join('')}
+                                        </tr>`
+                                      ).join('')}
+                                    </tbody>
+                                  </table>`;
+                                const win = window.open('', '_blank');
+                                win.document.write(`<!DOCTYPE html><html><head><title>Bookmarks Cetak</title></head><body onload="window.print()">${tableHTML}</body></html>`);
+                                win.document.close();
+                              }}
+                            >
+                              🖨️ Cetak
+                            </button>
+                            <span className="table-row-count">{bookmarksList.length} baris tersimpan</span>
+                          </div>
+
+                          <div className="table-responsive">
+                            <table className="excel-table">
+                              <thead>
+                                <tr>
+                                  <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
+                                  {showFile && <th>Nama Berkas</th>}
+                                  {showSheet && <th>Sheet</th>}
+                                  {showBaris && <th>Baris</th>}
+                                  {orderedBookmarkHeaders.map(h => (
+                                    <th key={h}>{getColumnLabel(h)}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {bookmarksList.map(match => (
+                                  <tr key={match.id}>
+                                    <td className="meta-cell text-center" style={{ width: '40px' }}>
+                                      <button
+                                        className="bookmark-star-btn active"
+                                        onClick={() => handleToggleBookmark(match.id, true)}
+                                        title="Hapus dari Bookmark"
+                                      >
+                                        ★
+                                      </button>
                                     </td>
-                                  );
-                                })}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                                    {showFile && <td className="meta-cell font-accent">{match.filename}</td>}
+                                    {showSheet && <td className="meta-cell">{match.sheet_name}</td>}
+                                    {showBaris && <td className="meta-cell text-center">{match.row_number}</td>}
+                                    {orderedBookmarkHeaders.map(h => {
+                                      const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
+                                      return (
+                                        <td key={h} className={isDesc ? 'description-cell' : ''}>
+                                          {match.row_data[h] ?? ''}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </>
+                      )}
                     </>
                   );
                 })()}
