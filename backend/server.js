@@ -654,9 +654,6 @@ app.get('/api/search', async (req, res) => {
           });
         });
         
-        searchQuery = `
-          SELECT 
-            r.id, 
         // Add filters if any
         let filterClauses = [];
         if (filterSheet && filterSheet.trim() !== '') {
@@ -672,7 +669,7 @@ app.get('/api/search', async (req, res) => {
 
         searchQuery = `
           SELECT 
-            r.id, 
+            r.id,
             r.file_id, 
             r.sheet_name, 
             r.row_number, 
