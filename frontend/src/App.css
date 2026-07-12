@@ -1717,3 +1717,107 @@ body.light-mode .column-checkbox-label:hover {
 body.light-mode .column-checkbox-label.meta-checkbox {
   color: var(--accent-secondary);
 }
+
+/* Light mode overrides for all remaining elements */
+body.light-mode mark.highlight {
+  background: rgba(234, 179, 8, 0.25);
+  color: #854d0e;
+  border-bottom-color: rgba(234, 179, 8, 0.6);
+}
+
+body.light-mode .empty-state h3 {
+  color: var(--text-primary);
+}
+
+body.light-mode .shortcut-key {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--glass-border);
+}
+
+body.light-mode .upload-container h2 {
+  color: var(--text-primary);
+}
+
+body.light-mode .main-drop-text {
+  color: var(--text-primary);
+}
+
+body.light-mode .upload-status-text {
+  color: var(--text-primary);
+}
+
+body.light-mode .success-details strong {
+  color: var(--text-primary);
+}
+
+body.light-mode .files-header h2 {
+  color: var(--text-primary);
+}
+
+body.light-mode .file-card-title {
+  color: var(--text-primary);
+}
+
+body.light-mode .file-card:hover {
+  border-color: rgba(59, 130, 246, 0.2);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.05);
+}
+
+body.light-mode .column-filter-trigger-btn {
+  color: var(--text-secondary);
+}
+body.light-mode .column-filter-trigger-btn:hover {
+  color: #fff;
+}
+
+body.light-mode .logs-search-input {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+body.light-mode .logs-search-clear:hover {
+  color: var(--text-primary);
+}
+
+body.light-mode .logs-per-page select {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+body.light-mode .logs-info-bar strong {
+  color: var(--text-primary);
+}
+
+body.light-mode .page-btn {
+  background: var(--bg-secondary);
+}
+
+body.light-mode .page-btn:hover:not(:disabled) {
+  color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+body.light-mode .column-filter-trigger-btn.active {
+  color: #fff;
+}
+
+body.light-mode .dropzone {
+  background: rgba(0, 0, 0, 0.01);
+}
+body.light-mode .dropzone:hover {
+  background: rgba(59, 130, 246, 0.03);
+}
+
+body.light-mode .today-act-card {
+  background: var(--bg-secondary);
+}
+
+body.light-mode .device-card {
+  background: var(--bg-secondary);
+}
+
+body.light-mode .device-card-ip {
+  color: #16a34a;
+}
+
