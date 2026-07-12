@@ -1524,3 +1524,61 @@ mark.highlight {
 @media (max-width: 480px) {
   .stat-card-grid { grid-template-columns: 1fr; }
 }
+
+/* ===== COLUMN FILTER ADDITIONS ===== */
+.column-filter-trigger-btn.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
+.dropdown-action-btn--close {
+  background: rgba(239, 68, 68, 0.08) !important;
+  border-color: rgba(239, 68, 68, 0.25) !important;
+  color: #f87171 !important;
+}
+
+.dropdown-action-btn--close:hover {
+  background: rgba(239, 68, 68, 0.2) !important;
+  color: #fff !important;
+}
+
+.active-filter-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  padding: 0.55rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 0.8rem;
+  font-size: 0.8rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.active-filter-text {
+  color: var(--text-secondary);
+}
+
+.active-filter-text strong {
+  color: #fff;
+}
+
+.reset-filter-link-btn {
+  background: none;
+  border: none;
+  color: var(--accent-primary);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all var(--transition-fast);
+}
+
+.reset-filter-link-btn:hover {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+}
+

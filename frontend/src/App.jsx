@@ -864,13 +864,13 @@ function App() {
                         {/* Column Filter Toggle Button */}
                         <div className="column-filter-container">
                           <button 
-                            className="column-filter-trigger-btn"
+                            className={`column-filter-trigger-btn ${showColumnFilter ? 'active' : ''}`}
                             onClick={() => {
                               setShowColumnFilter(!showColumnFilter);
                               if (showColumnFilter) setColumnSearchQuery('');
                             }}
                           >
-                            ⚙️ Pilih Kolom
+                            {showColumnFilter ? '✕ Tutup Pilihan' : '⚙️ Pilih Kolom'}
                           </button>
                           
                           {showColumnFilter && (
@@ -899,6 +899,7 @@ function App() {
                               <div className="dropdown-actions">
                                 <button className="dropdown-action-btn" onClick={() => { selectAllColumns(activeHeaders); setShowColumnFilter(false); }}>Tampilkan Semua</button>
                                 <button className="dropdown-action-btn" onClick={() => { clearAllColumns(activeHeaders); setShowColumnFilter(false); }}>Sembunyikan Semua</button>
+                                <button className="dropdown-action-btn dropdown-action-btn--close" onClick={() => setShowColumnFilter(false)}>✕ Tutup</button>
                               </div>
                               <div className="dropdown-items">
                                 {['Sheet', 'Baris']
@@ -959,6 +960,18 @@ function App() {
 
                         return (
                           <>
+                            {/* Column Filter Active Info Bar */}
+                            {visibleColumnsOrder.length > 0 && !visibleColumnsOrder.includes('__all_hidden__') && (
+                              <div className="active-filter-bar">
+                                <span className="active-filter-text">
+                                  ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan {showSheet ? 1 : 0 + (showBaris ? 1 : 0) + orderedDataHeaders.length} dari {activeHeaders.length + 2} kolom.
+                                </span>
+                                <button className="reset-filter-link-btn" onClick={() => setVisibleColumnsOrder([])}>
+                                  ✕ Reset Filter Kolom
+                                </button>
+                              </div>
+                            )}
+
                             {/* Action buttons: Copy + Print + Export + Share */}
                             <div className="table-action-bar">
                               <button
