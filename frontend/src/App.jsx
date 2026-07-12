@@ -1119,8 +1119,11 @@ function App() {
                     <thead>
                       <tr>
                         <th>Waktu Kejadian</th>
-                        <th>Tipe Aktivitas</th>
+                        <th>Tipe</th>
                         <th>Detail Aktivitas</th>
+                        <th>IP Address</th>
+                        <th>Perangkat & OS</th>
+                        <th>Browser</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1129,17 +1132,78 @@ function App() {
                         if (log.activity_type === 'upload') tagClass = 'tag-success';
                         if (log.activity_type === 'delete') tagClass = 'tag-danger';
                         if (log.activity_type === 'search') tagClass = 'tag-info';
+                        if (log.activity_type === 'access') tagClass = 'tag-access';
+
+                        // Device type icon
+                        const deviceType = (log.device_type || '').toLowerCase();
+                        let deviceIcon = '🖥️';
+                        if (deviceType === 'mobile') deviceIcon = '📱';
+                        else if (deviceType === 'tablet') deviceIcon = '📟';
+                        else if (deviceType === 'smarttv') deviceIcon = '📺';
+
+                        // OS icon
+                        const osName = (log.os || '').toLowerCase();
+                        let osIcon = '💻';
+                        if (osName.includes('windows')) osIcon = '🪟';
+                        else if (osName.includes('mac') || osName.includes('ios')) osIcon = '🍎';
+                        else if (osName.includes('android')) osIcon = '🤖';
+                        else if (osName.includes('linux')) osIcon = '🐧';
+
+                        // Browser icon
+                        const browserName = (log.browser || '').toLowerCase();
+                        let browserIcon = '🌐';
+                        if (browserName.includes('chrome')) browserIcon = '🟡';
+                        else if (browserName.includes('firefox')) browserIcon = '🦊';
+                        else if (browserName.includes('safari')) browserIcon = '🧭';
+                        else if (browserName.includes('edge')) browserIcon = '🔷';
+                        else if (browserName.includes('opera')) browserIcon = '🔴';
+
                         return (
                           <tr key={log.id}>
-                            <td className="meta-cell text-center" style={{ width: '180px' }}>
+                            <td className="meta-cell text-center" style={{ width: '160px', fontSize: '12px' }}>
                               {new Date(log.created_at).toLocaleString('id-ID')}
                             </td>
-                            <td className="text-center" style={{ width: '120px' }}>
+                            <td className="text-center" style={{ width: '100px' }}>
                               <span className={`activity-tag ${tagClass}`}>
                                 {log.activity_type.toUpperCase()}
                               </span>
                             </td>
-                            <td className="description-cell">{log.activity_details}</td>
+                            <td className="description-cell" style={{ fontSize: '13px' }}>
+                              {log.activity_details}
+                            </td>
+                            <td className="meta-cell text-center" style={{ width: '140px' }}>
+                              {log.ip_address ? (
+                                <span className="device-badge ip-badge" title={log.ip_address}>
+                                  🌐 {log.ip_address}
+                                </span>
+                              ) : <span className="no-data">—</span>}
+                            </td>
+                            <td className="meta-cell" style={{ width: '190px' }}>
+                              {log.os ? (
+                                <div className="device-info-cell">
+                                  <span className="device-badge os-badge" title={log.os}>
+                                    {osIcon} {log.os}
+                                  </span>
+                                  {log.device_label && log.device_label !== log.device_type && (
+                                    <span className="device-badge device-type-badge" title={log.device_label}>
+                                      {deviceIcon} {log.device_label}
+                                    </span>
+                                  )}
+                                  {(!log.device_label || log.device_label === log.device_type) && log.device_type && (
+                                    <span className="device-badge device-type-badge">
+                                      {deviceIcon} {log.device_type}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : <span className="no-data">—</span>}
+                            </td>
+                            <td className="meta-cell" style={{ width: '180px' }}>
+                              {log.browser ? (
+                                <span className="device-badge browser-badge" title={log.user_agent || log.browser}>
+                                  {browserIcon} {log.browser}
+                                </span>
+                              ) : <span className="no-data">—</span>}
+                            </td>
                           </tr>
                         );
                       })}

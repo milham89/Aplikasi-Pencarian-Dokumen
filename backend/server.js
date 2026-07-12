@@ -5,6 +5,7 @@ const ExcelJS = require('exceljs');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
+const { UAParser } = require('ua-parser-js');
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,44 @@ const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir);
 }
+
+// Helper: Parse device info from request
+const getDeviceInfo = (req) => {
+  const ua = req.headers['user-agent'] || '';
+  const parser = new UAParser(ua);
+  const result = parser.getResult();
+
+  const ip =
+    req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+    req.socket?.remoteAddress ||
+    req.connection?.remoteAddress ||
+    'Tidak diketahui';
+
+  const browser = result.browser.name
+    ? `${result.browser.name} ${result.browser.version || ''}`.trim()
+    : 'Browser Tidak Dikenal';
+
+  const os = result.os.name
+    ? `${result.os.name} ${result.os.version || ''}`.trim()
+    : 'OS Tidak Diketahui';
+
+  const deviceType = result.device.type || 'Desktop';
+  const deviceVendor = result.device.vendor || '';
+  const deviceModel = result.device.model || '';
+  const deviceLabel = [deviceVendor, deviceModel].filter(Boolean).join(' ') || deviceType;
+
+  const engine = result.engine.name ? `${result.engine.name} ${result.engine.version || ''}`.trim() : '';
+
+  return {
+    ip,
+    browser,
+    os,
+    device_type: deviceType.charAt(0).toUpperCase() + deviceType.slice(1),
+    device_label: deviceLabel,
+    engine,
+    user_agent: ua
+  };
+};
 
 // Middleware
 app.use(cors());
@@ -91,15 +130,29 @@ const initDatabase = async () => {
       );
     `);
 
-    // Create activity_logs table
+    // Create activity_logs table with device tracking
     await client.query(`
       CREATE TABLE IF NOT EXISTS activity_logs (
         id SERIAL PRIMARY KEY,
         activity_type VARCHAR(50) NOT NULL,
         activity_details TEXT NOT NULL,
+        ip_address VARCHAR(100),
+        browser VARCHAR(150),
+        os VARCHAR(150),
+        device_type VARCHAR(50),
+        device_label VARCHAR(200),
+        engine VARCHAR(100),
+        user_agent TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // Add device columns to existing table if they don't exist (migration)
+    const deviceCols = ['ip_address VARCHAR(100)', 'browser VARCHAR(150)', 'os VARCHAR(150)', 'device_type VARCHAR(50)', 'device_label VARCHAR(200)', 'engine VARCHAR(100)', 'user_agent TEXT'];
+    for (const col of deviceCols) {
+      const colName = col.split(' ')[0];
+      await client.query(`ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS ${colName} ${col.split(' ').slice(1).join(' ')};`);
+    }
 
     // Create index on JSONB if it doesn't exist
     await client.query(`
@@ -138,13 +191,25 @@ const initDatabase = async () => {
 // Call DB Init
 initDatabase();
 
-// Function to log activities to database
-const logActivity = async (type, details) => {
+// Function to log activities to database (with optional device info)
+const logActivity = async (type, details, deviceInfo = null) => {
   try {
-    await pool.query(
-      `INSERT INTO activity_logs (activity_type, activity_details) VALUES ($1, $2);`,
-      [type, details]
-    );
+    if (deviceInfo) {
+      await pool.query(
+        `INSERT INTO activity_logs 
+          (activity_type, activity_details, ip_address, browser, os, device_type, device_label, engine, user_agent)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
+        [type, details,
+          deviceInfo.ip, deviceInfo.browser, deviceInfo.os,
+          deviceInfo.device_type, deviceInfo.device_label, deviceInfo.engine, deviceInfo.user_agent
+        ]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO activity_logs (activity_type, activity_details) VALUES ($1, $2);`,
+        [type, details]
+      );
+    }
   } catch (err) {
     console.error('Gagal menulis log aktivitas:', err);
   }
@@ -362,6 +427,9 @@ async function insertBatch(client, fileId, sheetName, batch) {
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
+    // Log device access whenever a user opens the app (health check is called on page load)
+    const device = getDeviceInfo(req);
+    logActivity('access', `Perangkat mengakses aplikasi dari ${device.ip}`, device);
     res.json({ status: 'ok', database: 'connected' });
   } catch (err) {
     res.status(500).json({ status: 'error', database: err.message });
@@ -611,7 +679,7 @@ app.get('/api/search', async (req, res) => {
     
     // Log search activity if it's a real query (not file preview)
     if (!fileId && queryText && queryText.trim() !== '') {
-      logActivity('search', `Mencari kata kunci: "${queryText.trim()}" (Menghasilkan ${searchRes.rows.length} baris data)`);
+      logActivity('search', `Mencari kata kunci: "${queryText.trim()}" (Menghasilkan ${searchRes.rows.length} baris data)`, getDeviceInfo(req));
     }
     
     const groupedResults = {};
@@ -668,8 +736,10 @@ app.get('/api/logs', async (req, res) => {
     const q     = (req.query.q || '').trim();
     const offset = (page - 1) * limit;
 
-    const conditions = q ? `WHERE activity_details ILIKE $1 OR activity_type ILIKE $1` : '';
-    const params     = q ? [`%${q}%`] : [];
+    const conditions = q
+      ? `WHERE activity_details ILIKE $1 OR activity_type ILIKE $1 OR ip_address ILIKE $1 OR browser ILIKE $1 OR os ILIKE $1 OR device_label ILIKE $1`
+      : '';
+    const params = q ? [`%${q}%`] : [];
 
     const countRes = await pool.query(
       `SELECT COUNT(*) FROM activity_logs ${conditions}`, params
@@ -677,7 +747,9 @@ app.get('/api/logs', async (req, res) => {
     const total = parseInt(countRes.rows[0].count);
 
     const dataRes = await pool.query(
-      `SELECT id, activity_type, activity_details, created_at
+      `SELECT id, activity_type, activity_details,
+              ip_address, browser, os, device_type, device_label, engine, user_agent,
+              created_at
        FROM activity_logs
        ${conditions}
        ORDER BY created_at DESC
@@ -710,7 +782,7 @@ app.delete('/api/files/:id', async (req, res) => {
     }
 
     const filename = deleteRes.rows[0].filename;
-    await logActivity('delete', `Menghapus berkas "${filename}" beserta seluruh data terkait.`);
+    await logActivity('delete', `Menghapus berkas "${filename}" beserta seluruh data terkait.`, getDeviceInfo(req));
 
     res.json({ 
       success: true, 
