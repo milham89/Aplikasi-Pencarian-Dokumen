@@ -1582,3 +1582,102 @@ mark.highlight {
   color: #60a5fa;
 }
 
+/* ===== LIGHT MODE READABILITY OVERRIDES ===== */
+body.light-mode .stats-item strong {
+  color: var(--text-primary);
+}
+
+body.light-mode .tab-btn:hover {
+  color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.08);
+}
+
+body.light-mode .tab-btn.active {
+  color: var(--accent-primary);
+  background: var(--bg-secondary);
+  border-color: rgba(59, 130, 246, 0.2);
+}
+
+body.light-mode .search-input {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+body.light-mode .clear-btn:hover {
+  color: var(--text-primary);
+}
+
+body.light-mode .file-tab-btn:hover {
+  color: var(--accent-primary);
+  background: rgba(59, 130, 246, 0.04);
+}
+
+body.light-mode .file-tab-btn.active {
+  color: var(--accent-primary);
+  background: var(--bg-secondary);
+  border-color: rgba(59, 130, 246, 0.2);
+}
+
+body.light-mode .file-tab-btn.active .file-tab-name {
+  color: var(--text-primary);
+}
+
+body.light-mode .results-card-header h2 {
+  color: var(--text-primary);
+}
+
+body.light-mode .excel-table th {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+
+body.light-mode .excel-table tr:hover {
+  background: rgba(0, 0, 0, 0.02);
+}
+
+body.light-mode .no-columns-state p strong {
+  color: var(--accent-primary);
+}
+
+body.light-mode .column-search-input {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+body.light-mode .dropdown-action-btn:hover {
+  color: var(--accent-primary);
+}
+
+body.light-mode .column-checkbox-label:hover {
+  color: var(--accent-primary);
+}
+
+body.light-mode .active-filter-text strong {
+  color: var(--text-primary);
+}
+
+body.light-mode .dashboard-header h2 {
+  color: var(--text-primary);
+}
+
+body.light-mode .dashboard-panel h3 {
+  color: var(--text-primary);
+}
+
+body.light-mode .stat-card-value {
+  color: var(--text-primary);
+}
+
+body.light-mode .today-act-count {
+  color: var(--text-primary);
+}
+
+body.light-mode .keyword-label {
+  color: var(--text-primary);
+}
+
+body.light-mode .section-header-row h2 {
+  color: var(--text-primary);
+}
+
+
