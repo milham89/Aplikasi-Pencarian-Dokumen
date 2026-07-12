@@ -1241,13 +1241,24 @@ function App() {
                           <>
                             {/* Column Filter Active Info Bar */}
                             {visibleColumnsOrder.length > 0 && !visibleColumnsOrder.includes('__all_hidden__') && (
-                              <div className="active-filter-bar">
-                                <span className="active-filter-text">
-                                  ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan {showSheet ? 1 : 0 + (showBaris ? 1 : 0) + orderedDataHeaders.length} dari {activeHeaders.length + 2} kolom.
-                                </span>
-                                <button className="reset-filter-link-btn" onClick={() => setVisibleColumnsOrder([])}>
-                                  ✕ Reset Filter Kolom
-                                </button>
+                              <div className="active-filter-bar" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '0.4rem', padding: '0.9rem 1.25rem' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: '0.5rem' }}>
+                                  <span className="active-filter-text">
+                                    ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan { (showSheet ? 1 : 0) + (showBaris ? 1 : 0) + orderedDataHeaders.length } dari { activeHeaders.length + 2 } kolom.
+                                  </span>
+                                  <button className="reset-filter-link-btn" onClick={() => setVisibleColumnsOrder([])}>
+                                    ✕ Reset Filter Kolom
+                                  </button>
+                                </div>
+                                <div className="selected-columns-list-info" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: '1.4', borderTop: '1px solid var(--glass-border)', paddingTop: '0.4rem' }}>
+                                  <strong>Kolom Terpilih:</strong> {
+                                    [
+                                      ...(showSheet ? ['Sheet'] : []),
+                                      ...(showBaris ? ['Baris'] : []),
+                                      ...orderedDataHeaders.map(h => getColumnLabel(h))
+                                    ].join(', ')
+                                  }
+                                </div>
                               </div>
                             )}
 
@@ -1494,13 +1505,25 @@ function App() {
 
                       {/* Bookmark Column Filter Active Info Bar */}
                       {bookmarkVisibleColumns.length > 0 && !bookmarkVisibleColumns.includes('__all_hidden__') && (
-                        <div className="active-filter-bar" style={{ marginBottom: '1rem' }}>
-                          <span className="active-filter-text">
-                            ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan { (showFile ? 1 : 0) + (showSheet ? 1 : 0) + (showBaris ? 1 : 0) + orderedBookmarkHeaders.length } dari { bookmarkedHeaders.length + 3 } kolom.
-                          </span>
-                          <button className="reset-filter-link-btn" onClick={() => setBookmarkVisibleColumns([])}>
-                            ✕ Reset Filter Kolom
-                          </button>
+                        <div className="active-filter-bar" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '0.4rem', padding: '0.9rem 1.25rem', marginBottom: '1rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', flexWrap: 'wrap', gap: '0.5rem' }}>
+                            <span className="active-filter-text">
+                              ℹ️ <strong>Filter Kolom Aktif:</strong> Menampilkan { (showFile ? 1 : 0) + (showSheet ? 1 : 0) + (showBaris ? 1 : 0) + orderedBookmarkHeaders.length } dari { bookmarkedHeaders.length + 3 } kolom.
+                            </span>
+                            <button className="reset-filter-link-btn" onClick={() => setBookmarkVisibleColumns([])}>
+                              ✕ Reset Filter Kolom
+                            </button>
+                          </div>
+                          <div className="selected-columns-list-info" style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', lineHeight: '1.4', borderTop: '1px solid var(--glass-border)', paddingTop: '0.4rem' }}>
+                            <strong>Kolom Terpilih:</strong> {
+                              [
+                                ...(showFile ? ['File'] : []),
+                                ...(showSheet ? ['Sheet'] : []),
+                                ...(showBaris ? ['Baris'] : []),
+                                ...orderedBookmarkHeaders.map(h => getColumnLabel(h))
+                              ].join(', ')
+                            }
+                          </div>
                         </div>
                       )}
 
