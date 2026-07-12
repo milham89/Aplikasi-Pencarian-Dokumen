@@ -25,7 +25,7 @@ const getColumnLabel = (key) => {
 };
 
 function App() {
-  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard'
+  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard' | 'bookmarks'
   const [activeTab, setActiveTab] = useState('search');
   
   // Dark/Light Theme
@@ -51,6 +51,28 @@ function App() {
   const [searchUIState, setSearchUIState] = useState('loading'); // 'welcome' | 'preview' | 'loading' | 'results' | 'empty'
   const [selectedFileId, setSelectedFileId] = useState(null); // Active file tab in results
   
+  // Advanced filters state
+  const [filterSheet, setFilterSheet] = useState('');
+  const [filterUnit, setFilterUnit] = useState('');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+
+  // Search History state
+  const [searchHistory, setSearchHistory] = useState(() => {
+    try {
+      const saved = localStorage.getItem('spreadsheet_search_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Bookmarks state
+  const [bookmarksList, setBookmarksList] = useState([]);
+  const [loadingBookmarks, setLoadingBookmarks] = useState(false);
+  
+  // Bulk Delete selection state
+  const [selectedFileIds, setSelectedFileIds] = useState([]);
+
   // Column visibility filter state (persisted in localStorage)
   const [visibleColumnsOrder, setVisibleColumnsOrder] = useState(() => {
     try {
@@ -164,7 +186,14 @@ function App() {
     }
   }, [filesList]);
 
-  // Debounced search trigger / Auto preview trigger
+  // Fetch bookmarks when bookmarks tab is active
+  useEffect(() => {
+    if (activeTab === 'bookmarks') {
+      fetchBookmarks();
+    }
+  }, [activeTab]);
+
+  // Debounced search trigger / Auto preview trigger (re-runs when searchQuery, filterSheet, or filterUnit changes)
   useEffect(() => {
     // Sync URL with search query
     const url = new URL(window.location);
@@ -180,7 +209,7 @@ function App() {
         const activeId = selectedFileId && filesList.some(f => f.id === selectedFileId) 
           ? selectedFileId 
           : filesList[0].id;
-        fetchFilePreview(activeId);
+        fetchFilePreview(activeId, filterSheet, filterUnit);
       } else {
         setSearchResults([]);
         setSelectedFileId(null);
@@ -196,7 +225,7 @@ function App() {
     }, 600);
 
     return () => clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchQuery, filterSheet, filterUnit]);
 
   // Check backend & DB status
   const checkHealth = async () => {
@@ -320,12 +349,42 @@ function App() {
     }
   };
 
+  // Search History helpers
+  const addToHistory = (query) => {
+    if (!query || query.trim() === '') return;
+    const cleanQuery = query.trim();
+    setSearchHistory(prev => {
+      const filtered = prev.filter(q => q !== cleanQuery);
+      const next = [cleanQuery, ...filtered].slice(0, 8);
+      localStorage.setItem('spreadsheet_search_history', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const removeFromHistory = (e, queryToRemove) => {
+    e.stopPropagation();
+    setSearchHistory(prev => {
+      const next = prev.filter(q => q !== queryToRemove);
+      localStorage.setItem('spreadsheet_search_history', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const clearHistory = () => {
+    setSearchHistory([]);
+    localStorage.removeItem('spreadsheet_search_history');
+  };
+
   // Fetch and display a preview of a file (first 200 rows)
-  const fetchFilePreview = async (fileId) => {
+  const fetchFilePreview = async (fileId, sheet = filterSheet, unit = filterUnit) => {
     setSearchUIState('loading');
     setSearchResults([]);
     try {
-      const res = await fetch(`/api/search?fileId=${fileId}`);
+      const params = new URLSearchParams({ fileId });
+      if (sheet) params.append('sheet', sheet);
+      if (unit) params.append('unit', unit);
+
+      const res = await fetch(`/api/search?${params}`);
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
@@ -359,13 +418,20 @@ function App() {
     setSearchUIState('loading');
     setSearchResults([]);
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`, {
+      const params = new URLSearchParams({ q: searchQuery });
+      if (filterSheet) params.append('sheet', filterSheet);
+      if (filterUnit) params.append('unit', filterUnit);
+
+      const res = await fetch(`/api/search?${params}`, {
         signal: controller.signal
       });
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
         
+        // Save to search history
+        addToHistory(searchQuery);
+
         // Auto select the first file in the search results to display it instantly
         if (data.results.length > 0) {
           setSelectedFileId(data.results[0].fileId);
@@ -390,7 +456,7 @@ function App() {
   // Handle file tab click
   const handleFileTabClick = (fileId) => {
     if (searchQuery.trim() === '') {
-      fetchFilePreview(fileId);
+      fetchFilePreview(fileId, filterSheet, filterUnit);
     } else {
       setSelectedFileId(fileId);
     }
@@ -446,6 +512,91 @@ function App() {
     );
   };
 
+  // Fetch bookmarked rows from server
+  const fetchBookmarks = async () => {
+    setLoadingBookmarks(true);
+    try {
+      const res = await fetch('/api/bookmarks');
+      if (res.ok) {
+        const data = await res.json();
+        setBookmarksList(data.bookmarks || []);
+      }
+    } catch (err) {
+      console.error('Gagal memuat bookmark:', err);
+    } finally {
+      setLoadingBookmarks(false);
+    }
+  };
+
+  // Toggle row bookmark state
+  const handleToggleBookmark = async (rowId, currentStatus) => {
+    try {
+      const method = currentStatus ? 'DELETE' : 'POST';
+      const url = currentStatus ? `/api/bookmarks/${rowId}` : '/api/bookmarks';
+      const body = currentStatus ? null : JSON.stringify({ rowId });
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body
+      });
+
+      if (res.ok) {
+        // Toggle locally in searchResults
+        setSearchResults(prev => prev.map(file => ({
+          ...file,
+          matches: file.matches.map(m => m.id === rowId ? { ...m, isBookmarked: !currentStatus } : m)
+        })));
+
+        // If bookmarks list is active or displayed, refresh it
+        fetchBookmarks();
+        showToast(
+          currentStatus ? '⭐ Bookmark Dihapus' : '⭐ Tersimpan ke Bookmark',
+          currentStatus ? 'Baris dokumen berhasil dihapus dari bookmark.' : 'Baris dokumen berhasil disimpan.',
+          'success'
+        );
+      }
+    } catch (err) {
+      console.error('Gagal toggle bookmark:', err);
+      showToast('⚠️ Gagal', 'Gagal memproses bookmark.', 'error');
+    }
+  };
+
+  // Bulk delete selected files
+  const handleBulkDelete = async () => {
+    if (selectedFileIds.length === 0) return;
+
+    const filenames = filesList
+      .filter(f => selectedFileIds.includes(f.id))
+      .map(f => f.filename)
+      .join(', ');
+
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus ${selectedFileIds.length} berkas berikut beserta seluruh datanya?\n\n${filenames}`)) {
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/files/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedFileIds })
+      });
+
+      const data = await res.json();
+      if (res.ok) {
+        showToast('🗑️ Penghapusan Massal Sukses', `${selectedFileIds.length} file berhasil dihapus secara permanen.`, 'success');
+        setSelectedFileIds([]);
+        setSelectedFileId(null);
+        fetchFiles();
+      } else {
+        showToast('⚠️ Gagal Hapus Massal', data.error || 'Terjadi kesalahan.', 'error');
+      }
+    } catch (err) {
+      console.error('Error bulk delete:', err);
+      showToast('⚠️ Error Koneksi', 'Gagal menghubungi server.', 'error');
+    }
+  };
+
   // Delete file
   const handleDeleteFile = async (id, filename) => {
     if (!window.confirm(`Apakah Anda yakin ingin menghapus file "${filename}"? Semua data di dalamnya akan terhapus permanen dari aplikasi.`)) {
@@ -455,7 +606,7 @@ function App() {
     try {
       const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        alert('File berhasil dihapus.');
+        showToast('🗑️ File Dihapus', `Berkas "${filename}" berhasil dihapus.`, 'success');
         setSelectedFileId(null);
         fetchFiles();
       } else {
@@ -757,6 +908,12 @@ function App() {
           🔍 Pencarian Data
         </button>
         <button 
+          className={`tab-btn ${activeTab === 'bookmarks' ? 'active' : ''}`}
+          onClick={() => setActiveTab('bookmarks')}
+        >
+          ⭐ Bookmark ({bookmarksList.length})
+        </button>
+        <button 
           className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
           onClick={() => setActiveTab('upload')}
         >
@@ -788,20 +945,91 @@ function App() {
         {/* TAB 1: SEARCH */}
         {activeTab === 'search' && (
           <div className="search-tab-content">
-            <div className="search-bar-container">
-              <span className="search-icon">🔍</span>
-              <input
-                ref={searchInputRef}
-                type="text"
-                className="search-input"
-                placeholder="Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              {searchQuery && (
-                <button className="clear-btn" onClick={() => setSearchQuery('')}>✕</button>
-              )}
+            <div className="search-bar-row">
+              <div className="search-bar-container">
+                <span className="search-icon">🔍</span>
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  className="search-input"
+                  placeholder="Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+                {searchQuery && (
+                  <button className="clear-btn" onClick={() => setSearchQuery('')}>✕</button>
+                )}
+              </div>
+              <button
+                className={`adv-filter-toggle-btn ${showAdvancedFilters ? 'active' : ''}`}
+                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                title="Saring berdasarkan sheet atau unit tertentu"
+              >
+                ⚙️ Filter Lanjutan
+              </button>
             </div>
+
+            {/* Advanced Filters Panel */}
+            {showAdvancedFilters && (
+              <div className="advanced-filters-panel">
+                <div className="filter-group">
+                  <label>Saring Sheet:</label>
+                  <input
+                    type="text"
+                    className="filter-input-field"
+                    placeholder="Contoh: Sheet1, Central"
+                    value={filterSheet}
+                    onChange={(e) => setFilterSheet(e.target.value)}
+                  />
+                </div>
+                <div className="filter-group">
+                  <label>Saring Unit (Kode):</label>
+                  <input
+                    type="text"
+                    className="filter-input-field"
+                    placeholder="Contoh: 011, 012"
+                    value={filterUnit}
+                    onChange={(e) => setFilterUnit(e.target.value)}
+                  />
+                </div>
+                {(filterSheet || filterUnit) && (
+                  <button
+                    className="clear-filters-btn"
+                    onClick={() => { setFilterSheet(''); setFilterUnit(''); }}
+                  >
+                    Reset Filter
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Search History Chips */}
+            {searchQuery.trim() === '' && searchHistory.length > 0 && (
+              <div className="search-history-container">
+                <span className="history-title">Riwayat Pencarian:</span>
+                <div className="history-chips">
+                  {searchHistory.map((q, idx) => (
+                    <div
+                      key={idx}
+                      className="history-chip"
+                      onClick={() => setSearchQuery(q)}
+                    >
+                      <span>{q}</span>
+                      <button
+                        className="delete-history-btn"
+                        onClick={(e) => removeFromHistory(e, q)}
+                        title="Hapus riwayat"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button className="clear-all-history-btn" onClick={clearHistory}>
+                    Hapus Semua
+                  </button>
+                </div>
+              </div>
+            )}
 
             {searchUIState === 'loading' && (
               <div className="search-loader">
@@ -1012,6 +1240,7 @@ function App() {
                               <table className="excel-table">
                                 <thead>
                                   <tr>
+                                    <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
                                     {showSheet && <th>Sheet</th>}
                                     {showBaris && <th>Baris</th>}
                                     {orderedDataHeaders.map(h => (
@@ -1022,6 +1251,15 @@ function App() {
                                 <tbody>
                                   {selectedFileData.matches.map(match => (
                                     <tr key={match.id}>
+                                      <td className="meta-cell text-center" style={{ width: '40px' }}>
+                                        <button
+                                          className={`bookmark-star-btn ${match.isBookmarked ? 'active' : ''}`}
+                                          onClick={() => handleToggleBookmark(match.id, match.isBookmarked)}
+                                          title={match.isBookmarked ? 'Hapus dari Bookmark' : 'Simpan ke Bookmark'}
+                                        >
+                                          {match.isBookmarked ? '★' : '☆'}
+                                        </button>
+                                      </td>
                                       {showSheet && (
                                         <td className="meta-cell font-accent">{match.sheetName}</td>
                                       )}
@@ -1071,6 +1309,142 @@ function App() {
                     <span className="shortcut-desc">Fokus ke Input Pencarian</span>
                   </div>
                 </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 1b: BOOKMARKS */}
+        {activeTab === 'bookmarks' && (
+          <div className="bookmarks-tab-content">
+            <div className="dashboard-header">
+              <h2>⭐ Data Bookmark</h2>
+              <p>Daftar baris data spreadsheet penting yang Anda simpan untuk referensi cepat.</p>
+            </div>
+
+            {loadingBookmarks ? (
+              <div className="search-loader">
+                <div className="spinner"></div>
+                <p>Mengambil data bookmark...</p>
+              </div>
+            ) : bookmarksList.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">⭐</div>
+                <h3>Belum ada bookmark</h3>
+                <p>Klik tombol bintang (☆) pada tabel hasil pencarian untuk menyimpan data penting di sini.</p>
+              </div>
+            ) : (
+              <div className="results-card">
+                {(() => {
+                  // Find all headers across bookmarked rows
+                  const allKeys = new Set();
+                  bookmarksList.forEach(m => {
+                    Object.keys(m.row_data).forEach(key => allKeys.add(key));
+                  });
+                  const bookmarkedHeaders = Array.from(allKeys);
+                  
+                  return (
+                    <>
+                      {/* Action buttons */}
+                      <div className="table-action-bar">
+                        <button
+                          className="table-action-btn table-action-btn--export"
+                          onClick={() => {
+                            const headers = ['File', 'Sheet', 'Baris', ...bookmarkedHeaders.map(h => getColumnLabel(h))];
+                            const rows = bookmarksList.map(m => [
+                              m.filename,
+                              m.sheet_name,
+                              m.row_number,
+                              ...bookmarkedHeaders.map(h => m.row_data[h] ?? '')
+                            ]);
+                            const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+                            const wb = XLSX.utils.book_new();
+                            XLSX.utils.book_append_sheet(wb, ws, 'Bookmarks');
+                            XLSX.writeFile(wb, `Bookmarks-${new Date().toLocaleDateString('id-ID').replace(/\//g, '-')}.xlsx`);
+                            showToast('📥 Berhasil Diekspor!', 'Bookmarks disimpan ke Excel.', 'success');
+                          }}
+                          title="Unduh seluruh bookmark ke Excel"
+                        >
+                          📥 Ekspor Excel ({bookmarksList.length})
+                        </button>
+                        <button
+                          className="table-action-btn"
+                          onClick={() => {
+                            const headers = ['File', 'Sheet', 'Baris', ...bookmarkedHeaders.map(h => getColumnLabel(h))];
+                            const rows = bookmarksList.map(m => [
+                              m.filename,
+                              m.sheet_name,
+                              m.row_number,
+                              ...bookmarkedHeaders.map(h => m.row_data[h] ?? '')
+                            ]);
+                            const tableHTML = `
+                              <table border="1" cellspacing="0" cellpadding="6"
+                                style="border-collapse:collapse;width:100%;font-size:10px;font-family:Arial,sans-serif">
+                                <thead style="background:#e8eaf0">
+                                  <tr>${headers.map(h => `<th style="text-align:left">${h}</th>`).join('')}</tr>
+                                </thead>
+                                <tbody>
+                                  ${rows.map((row, ri) =>
+                                    `<tr style="background:${ri % 2 === 0 ? '#fff' : '#f5f7fb'}">
+                                      ${row.map(cell => `<td>${cell ?? ''}</td>`).join('')}
+                                    </tr>`
+                                  ).join('')}
+                                </tbody>
+                              </table>`;
+                            const win = window.open('', '_blank');
+                            win.document.write(`<!DOCTYPE html><html><head><title>Bookmarks Cetak</title></head><body onload="window.print()">${tableHTML}</body></html>`);
+                            win.document.close();
+                          }}
+                        >
+                          🖨️ Cetak
+                        </button>
+                        <span className="table-row-count">{bookmarksList.length} baris tersimpan</span>
+                      </div>
+
+                      <div className="table-responsive">
+                        <table className="excel-table">
+                          <thead>
+                            <tr>
+                              <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
+                              <th>Nama Berkas</th>
+                              <th>Sheet</th>
+                              <th>Baris</th>
+                              {bookmarkedHeaders.map(h => (
+                                <th key={h}>{getColumnLabel(h)}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {bookmarksList.map(match => (
+                              <tr key={match.id}>
+                                <td className="meta-cell text-center" style={{ width: '40px' }}>
+                                  <button
+                                    className="bookmark-star-btn active"
+                                    onClick={() => handleToggleBookmark(match.id, true)}
+                                    title="Hapus dari Bookmark"
+                                  >
+                                    ★
+                                  </button>
+                                </td>
+                                <td className="meta-cell font-accent">{match.filename}</td>
+                                <td className="meta-cell">{match.sheet_name}</td>
+                                <td className="meta-cell text-center">{match.row_number}</td>
+                                {bookmarkedHeaders.map(h => {
+                                  const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
+                                  return (
+                                    <td key={h} className={isDesc ? 'description-cell' : ''}>
+                                      {match.row_data[h] ?? ''}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -1170,32 +1544,75 @@ function App() {
                 <p>Silakan buka tab <strong>Unggah Excel</strong> untuk mengimpor file pertama Anda.</p>
               </div>
             ) : (
-              <div className="files-grid">
-                {filesList.map(file => (
-                  <div key={file.id} className="file-card">
-                    <div className="file-card-details">
-                      <h3 className="file-card-title">📄 {file.filename}</h3>
-                      <div className="file-card-meta">
-                        <span className="meta-tag blue">⚡ {file.row_count} baris</span>
-                        <span className="meta-tag purple">📁 {file.sheet_names.length} sheet</span>
-                      </div>
-                      <p className="file-card-sheets">
-                        <strong>Sheets:</strong> {file.sheet_names.join(', ')}
-                      </p>
-                      <p className="file-card-date">
-                        Diunggah: {new Date(file.uploaded_at).toLocaleString('id-ID')}
-                      </p>
-                    </div>
-                    <button 
-                      className="delete-file-btn" 
-                      onClick={() => handleDeleteFile(file.id, file.filename)}
-                      title="Hapus file dan seluruh datanya"
+              <>
+                {/* Bulk Actions Header */}
+                <div className="bulk-actions-header">
+                  <label className="select-all-label">
+                    <input
+                      type="checkbox"
+                      checked={selectedFileIds.length === filesList.length && filesList.length > 0}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedFileIds(filesList.map(f => f.id));
+                        } else {
+                          setSelectedFileIds([]);
+                        }
+                      }}
+                    />
+                    <span>Pilih Semua ({filesList.length})</span>
+                  </label>
+                  
+                  {selectedFileIds.length > 0 && (
+                    <button
+                      className="bulk-delete-btn"
+                      onClick={handleBulkDelete}
                     >
-                      🗑️ Hapus
+                      🗑️ Hapus Terpilih ({selectedFileIds.length})
                     </button>
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+
+                <div className="files-grid">
+                  {filesList.map(file => (
+                    <div key={file.id} className={`file-card ${selectedFileIds.includes(file.id) ? 'selected' : ''}`}>
+                      <div className="file-card-checkbox-wrapper">
+                        <input
+                          type="checkbox"
+                          className="file-select-checkbox"
+                          checked={selectedFileIds.includes(file.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedFileIds(prev => [...prev, file.id]);
+                            } else {
+                              setSelectedFileIds(prev => prev.filter(id => id !== file.id));
+                            }
+                          }}
+                        />
+                      </div>
+                      <div className="file-card-details">
+                        <h3 className="file-card-title" title={file.filename}>📄 {file.filename}</h3>
+                        <div className="file-card-meta">
+                          <span className="meta-tag blue">⚡ {file.row_count} baris</span>
+                          <span className="meta-tag purple">📁 {file.sheet_names.length} sheet</span>
+                        </div>
+                        <p className="file-card-sheets">
+                          <strong>Sheets:</strong> {file.sheet_names.join(', ')}
+                        </p>
+                        <p className="file-card-date">
+                          Diunggah: {new Date(file.uploaded_at).toLocaleString('id-ID')}
+                        </p>
+                      </div>
+                      <button 
+                        className="delete-file-btn" 
+                        onClick={() => handleDeleteFile(file.id, file.filename)}
+                        title="Hapus file dan seluruh datanya"
+                      >
+                        🗑️ Hapus
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}

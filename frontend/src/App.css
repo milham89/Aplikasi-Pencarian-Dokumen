@@ -1860,4 +1860,232 @@ body.light-mode .no-data {
   color: var(--text-muted);
 }
 
+/* ===== NEW FEATURE STYLES ===== */
+
+/* Advanced Search Filters */
+.search-bar-row {
+  display: flex;
+  gap: 0.75rem;
+  width: 100%;
+  margin-bottom: 0.8rem;
+  align-items: stretch;
+}
+.search-bar-row .search-bar-container {
+  flex: 1;
+  margin-bottom: 0;
+}
+.adv-filter-toggle-btn {
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  color: var(--text-secondary);
+  padding: 0 1.25rem;
+  border-radius: 14px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+.adv-filter-toggle-btn:hover, .adv-filter-toggle-btn.active {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  background: rgba(59, 130, 246, 0.1);
+}
+
+.advanced-filters-panel {
+  display: flex;
+  gap: 1.5rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--glass-border);
+  padding: 1.25rem;
+  border-radius: 12px;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 200px;
+}
+.filter-group label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.filter-input-field {
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  color: #fff;
+  padding: 0.55rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.filter-input-field:focus {
+  border-color: var(--accent-primary);
+}
+.clear-filters-btn {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  padding: 0.55rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+}
+.clear-filters-btn:hover {
+  background: var(--accent-danger);
+  color: #fff;
+  border-color: var(--accent-danger);
+}
+
+body.light-mode .filter-input-field {
+  color: var(--text-primary);
+}
+
+/* Search History Chips */
+.search-history-container {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0 0.25rem;
+}
+.history-title {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.history-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.history-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  padding: 0.25rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.history-chip:hover {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+.delete-history-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0;
+  line-height: 1;
+}
+.delete-history-btn:hover {
+  color: var(--accent-danger);
+}
+.clear-all-history-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 2px 6px;
+}
+.clear-all-history-btn:hover {
+  color: var(--text-primary);
+}
+
+/* Bookmarks Star Button in Table */
+.bookmark-star-btn {
+  background: none;
+  border: none;
+  font-size: 1.25rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0;
+  transition: transform 0.15s ease, color 0.15s ease;
+  line-height: 1;
+}
+.bookmark-star-btn:hover {
+  transform: scale(1.2);
+  color: #fbbf24;
+}
+.bookmark-star-btn.active {
+  color: #fbbf24;
+  text-shadow: 0 0 4px rgba(251, 191, 36, 0.4);
+}
+
+/* Bulk Delete UI in Manage Files */
+.bulk-actions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  padding: 0.75rem 1.25rem;
+  border-radius: 10px;
+  margin-bottom: 1.25rem;
+}
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.select-all-label input, .file-select-checkbox {
+  accent-color: var(--accent-primary);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
+.bulk-delete-btn {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #f87171;
+  padding: 0.45rem 1rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.bulk-delete-btn:hover {
+  background: var(--accent-danger);
+  color: #fff;
+  border-color: var(--accent-danger);
+}
+
+.file-card-checkbox-wrapper {
+  margin-bottom: 0.5rem;
+  display: flex;
+  justify-content: flex-end;
+}
+.file-card.selected {
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(59, 130, 246, 0.03);
+}
+
+body.light-mode .file-card.selected {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+
 

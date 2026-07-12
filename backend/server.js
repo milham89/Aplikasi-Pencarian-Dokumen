@@ -180,6 +180,16 @@ const initDatabase = async () => {
       console.warn('Gagal mengaktifkan pg_trgm saat startup:', trgmErr.message);
     }
 
+    // Create bookmarks table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bookmarks (
+        id SERIAL PRIMARY KEY,
+        row_id INTEGER NOT NULL REFERENCES document_rows(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT unique_row_bookmark UNIQUE(row_id)
+      );
+    `);
+
     console.log('Inisialisasi database PostgreSQL sukses.');
   } catch (err) {
     console.error('Gagal melakukan inisialisasi database:', err.message);
@@ -544,6 +554,8 @@ app.get('/api/upload/status/:jobId', (req, res) => {
 app.get('/api/search', async (req, res) => {
   const queryText = req.query.q;
   const fileId = req.query.fileId;
+  const filterSheet = req.query.sheet; // Optional sheet filter
+  const filterUnit = req.query.unit;   // Optional unit filter
 
   if ((!queryText || queryText.trim() === '') && !fileId) {
     return res.json({ results: [] });
@@ -554,7 +566,19 @@ app.get('/api/search', async (req, res) => {
     let queryParams;
 
     if (fileId) {
-      // Fetch all rows for a specific file
+      // Fetch all rows for a specific file (incorporating optional filters and bookmarks status)
+      let filterClauses = ['r.file_id = $1'];
+      queryParams = [parseInt(fileId)];
+
+      if (filterSheet && filterSheet.trim() !== '') {
+        queryParams.push(filterSheet.trim());
+        filterClauses.push(`r.sheet_name = $${queryParams.length}`);
+      }
+      if (filterUnit && filterUnit.trim() !== '') {
+        queryParams.push(`%${filterUnit.trim()}%`);
+        filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
+      }
+
       searchQuery = `
         SELECT 
           r.id, 
@@ -563,14 +587,15 @@ app.get('/api/search', async (req, res) => {
           r.row_number, 
           r.row_data, 
           f.filename, 
-          f.uploaded_at
+          f.uploaded_at,
+          (b.id IS NOT NULL) AS is_bookmarked
         FROM document_rows r
         JOIN uploaded_files f ON r.file_id = f.id
-        WHERE r.file_id = $1
+        LEFT JOIN bookmarks b ON b.row_id = r.id
+        WHERE ${filterClauses.join(' AND ')}
         ORDER BY r.sheet_name, r.row_number
-        LIMIT 200;
+        LIMIT 250;
       `;
-      queryParams = [parseInt(fileId)];
     } else {
       // Try to parse query as a standard box/pelaksana code (e.g. P011.A001.25 or P011.A.000001.2025)
       var codeMatch = queryText.trim().match(/^[pP](\d+)[\s\.]*([a-zA-Z])[\s\.]*(\d+)(?:[\s\.]*(\d{2,4}))?$/);
@@ -632,16 +657,34 @@ app.get('/api/search', async (req, res) => {
         searchQuery = `
           SELECT 
             r.id, 
+        // Add filters if any
+        let filterClauses = [];
+        if (filterSheet && filterSheet.trim() !== '') {
+          queryParams.push(filterSheet.trim());
+          filterClauses.push(`r.sheet_name = $${queryParams.length}`);
+        }
+        if (filterUnit && filterUnit.trim() !== '') {
+          queryParams.push(`%${filterUnit.trim()}%`);
+          filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
+        }
+
+        const filterSql = filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
+
+        searchQuery = `
+          SELECT 
+            r.id, 
             r.file_id, 
             r.sheet_name, 
             r.row_number, 
             r.row_data, 
             f.filename, 
             f.uploaded_at,
+            (b.id IS NOT NULL) AS is_bookmarked,
             100 as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
-          WHERE ${containmentClauses.join(' OR ')}
+          LEFT JOIN bookmarks b ON b.row_id = r.id
+          WHERE (${containmentClauses.join(' OR ')}) ${filterSql}
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
         `;
@@ -685,6 +728,16 @@ app.get('/api/search', async (req, res) => {
         const idxFullQuery = queryParams.length;
         scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxFullQuery} THEN 100 ELSE 0 END)`);
 
+        // Add filters if any
+        if (filterSheet && filterSheet.trim() !== '') {
+          queryParams.push(filterSheet.trim());
+          whereClauses.push(`r.sheet_name = $${queryParams.length}`);
+        }
+        if (filterUnit && filterUnit.trim() !== '') {
+          queryParams.push(`%${filterUnit.trim()}%`);
+          whereClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
+        }
+
         searchQuery = `
           SELECT 
             r.id, 
@@ -694,9 +747,11 @@ app.get('/api/search', async (req, res) => {
             r.row_data, 
             f.filename, 
             f.uploaded_at,
+            (b.id IS NOT NULL) AS is_bookmarked,
             (${scoreExpressions.join(' + ')}) as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id
           WHERE ${whereClauses.join(' AND ')}
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
@@ -729,6 +784,19 @@ app.get('/api/search', async (req, res) => {
       const pattern2_part2 = `%${boxLetter}${folder5}${yearPart}%`;
       
       const fallbackParams = [pattern1, pattern2_part1, pattern2_part2];
+      
+      let fallbackFilterClauses = [];
+      if (filterSheet && filterSheet.trim() !== '') {
+        fallbackParams.push(filterSheet.trim());
+        fallbackFilterClauses.push(`r.sheet_name = $${fallbackParams.length}`);
+      }
+      if (filterUnit && filterUnit.trim() !== '') {
+        fallbackParams.push(`%${filterUnit.trim()}%`);
+        fallbackFilterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${fallbackParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${fallbackParams.length})`);
+      }
+
+      const fallbackFilterSql = fallbackFilterClauses.length > 0 ? ' AND ' + fallbackFilterClauses.join(' AND ') : '';
+
       const fallbackQuery = `
         SELECT 
           r.id, 
@@ -738,6 +806,7 @@ app.get('/api/search', async (req, res) => {
           r.row_data, 
           f.filename, 
           f.uploaded_at,
+          (b.id IS NOT NULL) AS is_bookmarked,
           (CASE 
             WHEN r.row_data::text ILIKE $1 THEN 100 
             WHEN r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3 THEN 50 
@@ -745,7 +814,8 @@ app.get('/api/search', async (req, res) => {
           END) as relevance_score
         FROM document_rows r
         JOIN uploaded_files f ON r.file_id = f.id
-        WHERE r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)
+        LEFT JOIN bookmarks b ON b.row_id = r.id
+        WHERE (r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)) ${fallbackFilterSql}
         ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
         LIMIT 150;
       `;
@@ -771,7 +841,8 @@ app.get('/api/search', async (req, res) => {
         id: row.id,
         sheetName: row.sheet_name,
         rowNumber: row.row_number,
-        rowData: row.row_data
+        rowData: row.row_data,
+        isBookmarked: !!row.is_bookmarked
       });
     });
 
@@ -868,6 +939,109 @@ app.delete('/api/files/:id', async (req, res) => {
     res.status(500).json({ error: 'Gagal menghapus file: ' + err.message });
   }
 });
+
+// 6b. Bulk delete uploaded files
+app.post('/api/files/bulk-delete', async (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Tidak ada file ID yang diberikan!' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // Get filenames for logging
+    const fileRes = await client.query(
+      `SELECT filename FROM uploaded_files WHERE id = ANY($1)`,
+      [ids]
+    );
+    const filenames = fileRes.rows.map(r => r.filename);
+
+    const deleteRes = await client.query(
+      `DELETE FROM uploaded_files WHERE id = ANY($1)`,
+      [ids]
+    );
+
+    if (deleteRes.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Tidak ada file yang ditemukan untuk dihapus!' });
+    }
+
+    const device = getDeviceInfo(req);
+    await logActivity('delete', `Menghapus massal ${deleteRes.rowCount} berkas: ${filenames.join(', ')}`, device);
+
+    await client.query('COMMIT');
+    res.json({ 
+      success: true, 
+      message: `${deleteRes.rowCount} berkas berhasil dihapus.` 
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error bulk delete:', err);
+    res.status(500).json({ error: 'Gagal menghapus berkas massal: ' + err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// 7. Get bookmarks
+app.get('/api/bookmarks', async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        b.id as bookmark_id,
+        b.created_at as bookmarked_at,
+        r.id,
+        r.file_id,
+        r.sheet_name,
+        r.row_number,
+        r.row_data,
+        f.filename,
+        true AS is_bookmarked
+      FROM bookmarks b
+      JOIN document_rows r ON b.row_id = r.id
+      JOIN uploaded_files f ON r.file_id = f.id
+      ORDER BY b.created_at DESC;
+    `;
+    const bookmarkedRes = await pool.query(query);
+    res.json({ bookmarks: bookmarkedRes.rows });
+  } catch (err) {
+    console.error('Error bookmarks:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Add bookmark
+app.post('/api/bookmarks', async (req, res) => {
+  const { rowId } = req.body;
+  if (!rowId) {
+    return res.status(400).json({ error: 'rowId diperlukan!' });
+  }
+  try {
+    await pool.query(
+      `INSERT INTO bookmarks (row_id) VALUES ($1) ON CONFLICT (row_id) DO NOTHING;`,
+      [rowId]
+    );
+    res.json({ success: true, message: 'Data berhasil disimpan ke bookmark.' });
+  } catch (err) {
+    console.error('Error add bookmark:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. Remove bookmark
+app.delete('/api/bookmarks/:rowId', async (req, res) => {
+  const rowId = req.params.rowId;
+  try {
+    await pool.query(`DELETE FROM bookmarks WHERE row_id = $1;`, [rowId]);
+    res.json({ success: true, message: 'Bookmark berhasil dihapus.' });
+  } catch (err) {
+    console.error('Error delete bookmark:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 // Global error handler for upload limit
 app.use((err, req, res, next) => {
