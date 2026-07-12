@@ -436,6 +436,81 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// 1b. Dashboard Statistics
+app.get('/api/stats', async (req, res) => {
+  try {
+    // Total files and rows
+    const summaryRes = await pool.query(`
+      SELECT 
+        COUNT(*) AS total_files,
+        COALESCE(SUM(row_count), 0) AS total_rows
+      FROM uploaded_files;
+    `);
+
+    // Top 10 searched keywords (last 30 days)
+    const topSearchRes = await pool.query(`
+      SELECT activity_details, COUNT(*) AS count
+      FROM activity_logs
+      WHERE activity_type = 'search'
+        AND created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY activity_details
+      ORDER BY count DESC
+      LIMIT 10;
+    `);
+
+    // Docs per unit (top 15)
+    const unitRes = await pool.query(`
+      SELECT row_data->>'KODE UNIT' AS unit, COUNT(*) AS count
+      FROM document_rows
+      WHERE row_data->>'KODE UNIT' IS NOT NULL
+        AND row_data->>'KODE UNIT' <> ''
+      GROUP BY row_data->>'KODE UNIT'
+      ORDER BY count DESC
+      LIMIT 15;
+    `);
+
+    // Daily activity last 7 days
+    const dailyRes = await pool.query(`
+      SELECT 
+        DATE(created_at AT TIME ZONE 'Asia/Jakarta') AS day,
+        activity_type,
+        COUNT(*) AS count
+      FROM activity_logs
+      WHERE created_at >= NOW() - INTERVAL '7 days'
+      GROUP BY day, activity_type
+      ORDER BY day ASC;
+    `);
+
+    // Total searches, uploads, deletes, access today
+    const todayRes = await pool.query(`
+      SELECT activity_type, COUNT(*) AS count
+      FROM activity_logs
+      WHERE DATE(created_at AT TIME ZONE 'Asia/Jakarta') = CURRENT_DATE
+      GROUP BY activity_type;
+    `);
+
+    // Unique devices today
+    const devicesRes = await pool.query(`
+      SELECT DISTINCT ip_address, browser, os, device_type
+      FROM activity_logs
+      WHERE DATE(created_at AT TIME ZONE 'Asia/Jakarta') = CURRENT_DATE
+        AND ip_address IS NOT NULL;
+    `);
+
+    res.json({
+      summary: summaryRes.rows[0],
+      topSearches: topSearchRes.rows,
+      docsPerUnit: unitRes.rows,
+      dailyActivity: dailyRes.rows,
+      todayActivity: todayRes.rows,
+      devicesOnline: devicesRes.rows
+    });
+  } catch (err) {
+    console.error('Error stats:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 2. Upload Excel File (Triggers background processing)
 app.post('/api/upload', upload.single('file'), (req, res) => {
   if (!req.file) {

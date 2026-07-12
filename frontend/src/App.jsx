@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import * as XLSX from 'xlsx';
 import './App.css';
 
 const COLUMN_ALIASES = {
@@ -24,8 +25,21 @@ const getColumnLabel = (key) => {
 };
 
 function App() {
-  // Navigation Tabs: 'search' | 'upload' | 'files'
+  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard'
   const [activeTab, setActiveTab] = useState('search');
+  
+  // Dark/Light Theme
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('app_theme');
+    return saved ? saved === 'dark' : true;
+  });
+
+  // Toast notifications
+  const [toasts, setToasts] = useState([]);
+
+  // Dashboard stats
+  const [dashboardStats, setDashboardStats] = useState(null);
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
   
   // Database status
   const [dbConnected, setDbConnected] = useState(false);
@@ -82,6 +96,26 @@ function App() {
     fetchFiles();
   }, []);
 
+  // Sync dark/light mode to body class and localStorage
+  useEffect(() => {
+    if (isDarkMode) {
+      document.body.classList.remove('light-mode');
+    } else {
+      document.body.classList.add('light-mode');
+    }
+    localStorage.setItem('app_theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
+  // Sync URL search param on mount (share link feature)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('q');
+    if (q) {
+      setSearchQuery(q);
+      setActiveTab('search');
+    }
+  }, []);
+
   // Keyboard shortcut: focus search input on '/' key
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -132,9 +166,17 @@ function App() {
 
   // Debounced search trigger / Auto preview trigger
   useEffect(() => {
+    // Sync URL with search query
+    const url = new URL(window.location);
+    if (searchQuery.trim()) {
+      url.searchParams.set('q', searchQuery.trim());
+    } else {
+      url.searchParams.delete('q');
+    }
+    window.history.replaceState({}, '', url);
+
     if (searchQuery.trim() === '') {
       if (filesList.length > 0) {
-        // If a file is already selected, keep it, otherwise select the first one
         const activeId = selectedFileId && filesList.some(f => f.id === selectedFileId) 
           ? selectedFileId 
           : filesList[0].id;
@@ -164,6 +206,69 @@ function App() {
       setDbConnected(data.status === 'ok' && data.database === 'connected');
     } catch (err) {
       setDbConnected(false);
+    }
+  };
+
+  // Toast notification system
+  const showToast = useCallback((title, message, type = 'info') => {
+    const id = Date.now();
+    setToasts(prev => [...prev, { id, title, message, type }]);
+    setTimeout(() => {
+      setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t));
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 350);
+    }, 5000);
+  }, []);
+
+  const dismissToast = (id) => {
+    setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t));
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 350);
+  };
+
+  // Share link
+  const handleShareLink = () => {
+    const url = new URL(window.location);
+    if (searchQuery.trim()) url.searchParams.set('q', searchQuery.trim());
+    navigator.clipboard.writeText(url.toString()).then(() => {
+      showToast('🔗 Link Disalin!', `Link pencarian "${searchQuery}" berhasil disalin ke clipboard.`, 'info');
+    }).catch(() => {
+      showToast('⚠️ Gagal', 'Tidak bisa menyalin link.', 'error');
+    });
+  };
+
+  // Export to Excel
+  const handleExportExcel = (orderedDataHeaders, showSheet, showBaris) => {
+    if (!selectedFileData) return;
+    const headers = [
+      ...(showSheet ? ['Sheet'] : []),
+      ...(showBaris ? ['Baris'] : []),
+      ...orderedDataHeaders.map(h => getColumnLabel(h))
+    ];
+    const rows = selectedFileData.matches.map(match => [
+      ...(showSheet ? [match.sheetName] : []),
+      ...(showBaris ? [match.rowNumber] : []),
+      ...orderedDataHeaders.map(h => match.rowData[h] ?? '')
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Hasil Pencarian');
+    const filename = `Hasil-${searchQuery.trim() || 'Pratinjau'}-${new Date().toLocaleDateString('id-ID').replace(/\//g, '-')}.xlsx`;
+    XLSX.writeFile(wb, filename);
+    showToast('📥 Berhasil Diekspor!', `Data disimpan ke "${filename}"`, 'success');
+  };
+
+  // Fetch dashboard statistics
+  const fetchDashboard = async () => {
+    setLoadingDashboard(true);
+    try {
+      const res = await fetch('/api/stats');
+      if (res.ok) {
+        const data = await res.json();
+        setDashboardStats(data);
+      }
+    } catch (err) {
+      console.error('Gagal memuat dashboard:', err);
+    } finally {
+      setLoadingDashboard(false);
     }
   };
 
@@ -442,6 +547,13 @@ function App() {
             setUploadSuccess(job.result);
             setUploading(false);
             
+            // Toast notification on upload complete
+            showToast(
+              '✅ Upload Selesai!',
+              `File "${job.result.filename}" berhasil diimpor. ${job.result.rowsInserted?.toLocaleString('id-ID') || 0} baris data siap dicari.`,
+              'upload'
+            );
+            
             // Set newly uploaded file as active preview file
             setSelectedFileId(job.result.fileId);
             fetchFiles(); 
@@ -449,6 +561,7 @@ function App() {
             clearInterval(pollInterval);
             setUploadError(job.error || 'Terjadi kesalahan saat memproses file.');
             setUploading(false);
+            showToast('⚠️ Upload Gagal', job.error || 'Terjadi kesalahan saat memproses file.', 'error');
           }
         } catch (pollErr) {
           clearInterval(pollInterval);
@@ -616,9 +729,18 @@ function App() {
           <div className="stats-badge">
             <span className="stats-item">📁 <strong>{stats.totalFiles}</strong> File</span>
             <span className="stats-divider">|</span>
-            <span className="stats-item">⚡ <strong>{stats.totalRows}</strong> Baris Data</span>
+            <span className="stats-item">⚡ <strong>{stats.totalRows.toLocaleString('id-ID')}</strong> Baris Data</span>
           </div>
           
+          {/* Theme Toggle */}
+          <button
+            className="theme-toggle-btn"
+            onClick={() => setIsDarkMode(m => !m)}
+            title={isDarkMode ? 'Beralih ke Mode Terang' : 'Beralih ke Mode Gelap'}
+          >
+            {isDarkMode ? '☀️ Terang' : '🌙 Gelap'}
+          </button>
+
           <div className={`db-status-pill ${dbConnected ? 'connected' : 'disconnected'}`}>
             <span className="dot"></span>
             <span>{dbConnected ? 'Database Connected' : 'Database Offline'}</span>
@@ -651,6 +773,12 @@ function App() {
           onClick={() => setActiveTab('logs')}
         >
           📜 Log Aktivitas
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => { setActiveTab('dashboard'); fetchDashboard(); }}
+        >
+          📊 Dashboard
         </button>
       </nav>
 
@@ -831,7 +959,7 @@ function App() {
 
                         return (
                           <>
-                            {/* Action buttons: Copy + Print */}
+                            {/* Action buttons: Copy + Print + Export + Share */}
                             <div className="table-action-bar">
                               <button
                                 className={`table-action-btn ${copySuccess ? 'success' : ''}`}
@@ -841,12 +969,28 @@ function App() {
                                 {copySuccess ? '✅ Tersalin!' : '📋 Salin Data'}
                               </button>
                               <button
+                                className="table-action-btn table-action-btn--export"
+                                onClick={() => handleExportExcel(orderedDataHeaders, showSheet, showBaris)}
+                                title="Unduh data sebagai file Excel (.xlsx)"
+                              >
+                                📥 Ekspor Excel
+                              </button>
+                              <button
                                 className="table-action-btn"
                                 onClick={() => handlePrint(orderedDataHeaders, showSheet, showBaris)}
                                 title="Buka jendela cetak"
                               >
                                 🖨️ Cetak
                               </button>
+                              {searchQuery.trim() && (
+                                <button
+                                  className="table-action-btn table-action-btn--share"
+                                  onClick={handleShareLink}
+                                  title="Salin link pencarian ini ke clipboard"
+                                >
+                                  🔗 Bagikan
+                                </button>
+                              )}
                               <span className="table-row-count">
                                 {selectedFileData.matches.length} baris
                               </span>
@@ -1264,10 +1408,181 @@ function App() {
         )}
 
       </main>
+
+      {/* TAB 5: DASHBOARD */}
+      {activeTab === 'dashboard' && (
+        <main className="main-content">
+          <div className="dashboard-header">
+            <h2>📊 Dashboard Statistik</h2>
+            <p>Ringkasan aktivitas dan kondisi data aplikasi secara real-time.</p>
+            <button className="btn-refresh" onClick={fetchDashboard} disabled={loadingDashboard}>
+              {loadingDashboard ? '⏳ Memuat...' : '🔄 Refresh'}
+            </button>
+          </div>
+
+          {loadingDashboard ? (
+            <div className="search-loader"><div className="spinner"></div><p>Memuat statistik...</p></div>
+          ) : !dashboardStats ? (
+            <div className="empty-state">
+              <div className="empty-icon">📊</div>
+              <h3>Belum ada data</h3>
+              <p>Klik tombol Refresh untuk memuat statistik dashboard.</p>
+            </div>
+          ) : (
+            <div className="dashboard-grid">
+
+              {/* Summary Cards */}
+              <div className="stat-card-grid">
+                {[{
+                  icon: '📁', label: 'Total File', value: parseInt(dashboardStats.summary?.total_files || 0).toLocaleString('id-ID'), color: 'blue'
+                }, {
+                  icon: '⚡', label: 'Total Baris Data', value: parseInt(dashboardStats.summary?.total_rows || 0).toLocaleString('id-ID'), color: 'purple'
+                }, {
+                  icon: '🔍', label: 'Pencarian Hari Ini', value: (dashboardStats.todayActivity?.find(a => a.activity_type === 'search')?.count || 0), color: 'teal'
+                }, {
+                  icon: '💻', label: 'Perangkat Aktif Hari Ini', value: dashboardStats.devicesOnline?.length || 0, color: 'orange'
+                }].map((card, i) => (
+                  <div key={i} className={`stat-card stat-card--${card.color}`}>
+                    <div className="stat-card-icon">{card.icon}</div>
+                    <div className="stat-card-value">{card.value}</div>
+                    <div className="stat-card-label">{card.label}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Top Searches */}
+              <div className="dashboard-panel">
+                <h3>🔥 Kata Kunci Terpopuler (30 Hari)</h3>
+                {dashboardStats.topSearches?.length === 0 ? (
+                  <p className="no-data-text">Belum ada aktivitas pencarian.</p>
+                ) : (
+                  <div className="top-searches-list">
+                    {dashboardStats.topSearches?.map((s, i) => {
+                      const detail = s.activity_details || '';
+                      const match = detail.match(/"([^"]+)"/);
+                      const keyword = match ? match[1] : detail;
+                      const maxCount = dashboardStats.topSearches[0]?.count || 1;
+                      const pct = Math.round((s.count / maxCount) * 100);
+                      return (
+                        <div key={i} className="search-keyword-row">
+                          <span className="keyword-rank">#{i + 1}</span>
+                          <div className="keyword-bar-wrap">
+                            <div className="keyword-label" title={keyword}>{keyword}</div>
+                            <div className="keyword-bar-bg">
+                              <div className="keyword-bar-fill" style={{ width: `${pct}%` }}></div>
+                            </div>
+                          </div>
+                          <span className="keyword-count">{s.count}x</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Docs per Unit */}
+              <div className="dashboard-panel">
+                <h3>🏦 Dokumen per Unit (Top 15)</h3>
+                {dashboardStats.docsPerUnit?.length === 0 ? (
+                  <p className="no-data-text">Tidak ada data unit.</p>
+                ) : (
+                  <div className="top-searches-list">
+                    {dashboardStats.docsPerUnit?.map((u, i) => {
+                      const maxCount = dashboardStats.docsPerUnit[0]?.count || 1;
+                      const pct = Math.round((u.count / maxCount) * 100);
+                      return (
+                        <div key={i} className="search-keyword-row">
+                          <span className="keyword-rank">#{i + 1}</span>
+                          <div className="keyword-bar-wrap">
+                            <div className="keyword-label">{u.unit || '(Kosong)'}</div>
+                            <div className="keyword-bar-bg">
+                              <div className="keyword-bar-fill keyword-bar-fill--green" style={{ width: `${pct}%` }}></div>
+                            </div>
+                          </div>
+                          <span className="keyword-count">{parseInt(u.count).toLocaleString('id-ID')}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Today's Activity Breakdown */}
+              <div className="dashboard-panel">
+                <h3>📅 Aktivitas Hari Ini</h3>
+                <div className="today-activity-grid">
+                  {['access', 'search', 'upload', 'delete'].map(type => {
+                    const found = dashboardStats.todayActivity?.find(a => a.activity_type === type);
+                    const icons = { access: '📲', search: '🔍', upload: '📤', delete: '🗑️' };
+                    const labels = { access: 'Akses', search: 'Pencarian', upload: 'Upload', delete: 'Hapus' };
+                    return (
+                      <div key={type} className="today-act-card">
+                        <div className="today-act-icon">{icons[type]}</div>
+                        <div className="today-act-count">{found?.count || 0}</div>
+                        <div className="today-act-label">{labels[type]}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Devices Online Today */}
+              <div className="dashboard-panel dashboard-panel--wide">
+                <h3>💻 Perangkat Aktif Hari Ini</h3>
+                {dashboardStats.devicesOnline?.length === 0 ? (
+                  <p className="no-data-text">Belum ada perangkat yang mengakses hari ini.</p>
+                ) : (
+                  <div className="devices-grid">
+                    {dashboardStats.devicesOnline?.map((d, i) => {
+                      const osName = (d.os || '').toLowerCase();
+                      let osIcon = '💻';
+                      if (osName.includes('windows')) osIcon = '🪟';
+                      else if (osName.includes('mac') || osName.includes('ios')) osIcon = '🍎';
+                      else if (osName.includes('android')) osIcon = '🤖';
+                      else if (osName.includes('linux')) osIcon = '🐧';
+                      return (
+                        <div key={i} className="device-card">
+                          <div className="device-card-icon">{osIcon}</div>
+                          <div className="device-card-info">
+                            <div className="device-card-ip">{d.ip_address}</div>
+                            <div className="device-card-os">{d.os || 'Unknown OS'}</div>
+                            <div className="device-card-browser">{d.browser || 'Unknown Browser'}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+            </div>
+          )}
+        </main>
+      )}
       
       <footer className="app-footer-bar">
         <p>© 2026 SpreadSheet Finder — Didukung oleh React, Express, dan PostgreSQL</p>
       </footer>
+
+      {/* Toast Notification Container */}
+      <div className="toast-container">
+        {toasts.map(toast => {
+          const icons = { success: '✅', error: '⚠️', info: '🔔', upload: '📦' };
+          return (
+            <div
+              key={toast.id}
+              className={`toast toast-${toast.type} ${toast.exiting ? 'toast-exit' : ''}`}
+              onClick={() => dismissToast(toast.id)}
+            >
+              <div className="toast-icon">{icons[toast.type] || '🔔'}</div>
+              <div className="toast-body">
+                <div className="toast-title">{toast.title}</div>
+                <div className="toast-message">{toast.message}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
