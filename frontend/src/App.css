@@ -2088,4 +2088,365 @@ body.light-mode .file-card.selected {
 }
 
 
+/* ================================
+   MODAL OVERLAY
+   ================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  animation: fadeIn 0.2s ease;
+}
 
+.modal-box {
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 2rem;
+  width: 90%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: slideUp 0.25s ease;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ================================
+   BOOKMARK STYLES
+   ================================ */
+.bookmark-star-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.2rem;
+  padding: 2px 4px;
+  line-height: 1;
+  transition: transform 0.2s ease;
+}
+.bookmark-star-btn:hover {
+  transform: scale(1.3);
+}
+
+.bookmarks-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.btn-close-bookmarks {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--glass-border);
+  color: var(--text-secondary);
+  padding: 0.35rem 0.75rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-close-bookmarks:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-primary);
+}
+
+.bookmarks-tab-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.bookmark-category-tabs {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.bookmark-user-selector-container {
+  margin-bottom: 0.75rem;
+}
+
+.bookmark-edit-form-wrapper {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.btn-edit-bookmark {
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  color: #60a5fa;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-edit-bookmark:hover {
+  background: var(--accent-primary);
+  color: #fff;
+  border-color: var(--accent-primary);
+}
+
+.btn-view-bookmarks {
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  color: #fcd34d;
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.btn-view-bookmarks:hover {
+  background: #fbbf24;
+  color: #000;
+  border-color: #fbbf24;
+}
+
+.users-bookmarks-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 8px 24px var(--glass-shadow);
+  border-radius: 14px;
+  padding: 1.5rem;
+  animation: fadeIn 0.2s ease;
+}
+
+/* ================================
+   ANALYTICS DASHBOARD
+   ================================ */
+.dashboard-header {
+  margin-bottom: 1.5rem;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+}
+
+.dashboard-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 1.25rem;
+  box-shadow: 0 4px 16px var(--glass-shadow);
+}
+
+.dashboard-panel--wide {
+  grid-column: 1 / -1;
+}
+
+/* ================================
+   NOTIFICATION BELL & DROPDOWN
+   ================================ */
+.notification-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.notification-bell-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  width: 38px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.2rem;
+  cursor: pointer;
+  position: relative;
+  transition: all var(--transition-fast);
+  color: var(--text-primary);
+}
+.notification-bell-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  transform: scale(1.05);
+}
+
+.notification-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  background: var(--accent-danger);
+  color: white;
+  border-radius: 50%;
+  font-size: 0.68rem;
+  font-weight: bold;
+  min-width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+  border: 1px solid var(--bg-primary);
+}
+
+.notification-dropdown {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  width: 340px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 10px 30px var(--glass-shadow);
+  border-radius: 12px;
+  z-index: 1000;
+  overflow: hidden;
+  animation: fadeIn 0.15s ease;
+}
+
+.notification-dropdown-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--glass-border);
+}
+.notification-dropdown-header h4 {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.mark-all-read-btn {
+  background: none;
+  border: none;
+  color: var(--accent-primary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  transition: opacity var(--transition-fast);
+}
+.mark-all-read-btn:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+.notification-dropdown-list {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.no-notifications {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.notification-item {
+  display: flex;
+  gap: 12px;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  align-items: flex-start;
+}
+.notification-item:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+.notification-item.unread {
+  background: rgba(139, 92, 246, 0.05);
+}
+
+.notification-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+  flex-shrink: 0;
+  margin-top: 5px;
+}
+.notification-item.unread .notification-status-dot {
+  background: var(--accent-primary);
+  box-shadow: 0 0 8px var(--accent-primary);
+}
+
+.notification-item-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.notification-message {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+.notification-time {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* ================================
+   FLOATING TABLE SCROLL BUTTONS
+   ================================ */
+.drag-scroll-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.table-scroll-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 20;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  transition: all 0.2s ease;
+  pointer-events: all;
+}
+.table-scroll-btn:hover {
+  background: rgba(139, 92, 246, 0.98);
+  transform: translateY(-50%) scale(1.12);
+  box-shadow: 0 6px 22px rgba(139, 92, 246, 0.5);
+}
+.table-scroll-btn:active {
+  transform: translateY(-50%) scale(0.93);
+}
+.table-scroll-btn.scroll-left {
+  left: 10px;
+}
+.table-scroll-btn.scroll-right {
+  right: 10px;
+}

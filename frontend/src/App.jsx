@@ -25,7 +25,13 @@ const getColumnLabel = (key) => {
 };
 
 function App() {
-  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard' | 'bookmarks'
+  const [token, setToken] = useState(() => localStorage.getItem('app_token'));
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem('app_user');
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard' | 'bookmarks' | 'users'
   const [activeTab, setActiveTab] = useState('search');
   
   // Dark/Light Theme
@@ -36,6 +42,24 @@ function App() {
 
   // Toast notifications
   const [toasts, setToasts] = useState([]);
+
+  // Live Clock & Time State
+  const [currentTime, setCurrentTime] = useState(new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const getGreeting = () => {
+    const hour = currentTime.getHours();
+    if (hour >= 5 && hour < 11) return '☀️ Selamat Pagi';
+    if (hour >= 11 && hour < 15) return '🌤️ Selamat Siang';
+    if (hour >= 15 && hour < 19) return '⛅ Selamat Sore';
+    return '🌙 Selamat Malam';
+  };
 
   // Dashboard stats
   const [dashboardStats, setDashboardStats] = useState(null);
@@ -54,6 +78,7 @@ function App() {
   // Advanced filters state
   const [filterSheet, setFilterSheet] = useState('');
   const [filterUnit, setFilterUnit] = useState('');
+  const [searchUploaderFilter, setSearchUploaderFilter] = useState('all');
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
 
   // Search History state
@@ -119,16 +144,42 @@ function App() {
   const [uploadError, setUploadError] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
-  
+
+  // User Management state
+  const [usersList, setUsersList] = useState([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [newUsername, setNewUsername] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [newFullName, setNewFullName] = useState('');
+  const [newUserRole, setNewUserRole] = useState('viewer');
+  const [editingUser, setEditingUser] = useState(null); // holds user object when editing
+  const [selectedUserForBookmarks, setSelectedUserForBookmarks] = useState(null);
+  const [userBookmarksList, setUserBookmarksList] = useState([]);
+  const [loadingUserBookmarks, setLoadingUserBookmarks] = useState(false);
+  const [editingBookmark, setEditingBookmark] = useState(null);
+  const [editingBookmarkNotes, setEditingBookmarkNotes] = useState('');
+  const [editingBookmarkGroup, setEditingBookmarkGroup] = useState('Umum');
+  const [editingBookmarkRowData, setEditingBookmarkRowData] = useState({});
+  const [notificationsList, setNotificationsList] = useState([]);
+  const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+  const [broadcastRecipient, setBroadcastRecipient] = useState('all');
+  const [selectedUserFilterForBookmarks, setSelectedUserFilterForBookmarks] = useState('mine');
+  const [selectedBookmarkUserIds, setSelectedBookmarkUserIds] = useState([]);
+  const [showUserFilterDropdown, setShowUserFilterDropdown] = useState(false);
+  const [activeBookmarkGroupFilter, setActiveBookmarkGroupFilter] = useState('Semua');
+  const [showBookmarkGroupModal, setShowBookmarkGroupModal] = useState(false);
+  const [bookmarkGroupModalRowId, setBookmarkGroupModalRowId] = useState(null);
+  const [bookmarkGroupModalCurrentStatus, setBookmarkGroupModalCurrentStatus] = useState(false);
+  const [bookmarkGroupModalTargetUserId, setBookmarkGroupModalTargetUserId] = useState(null);
+  const [bookmarkGroupModalSelectedOption, setBookmarkGroupModalSelectedOption] = useState('existing'); // 'existing' or 'new'
+  const [bookmarkGroupModalSelectedExisting, setBookmarkGroupModalSelectedExisting] = useState('Umum');
+  const [bookmarkGroupModalNewInput, setBookmarkGroupModalNewInput] = useState('');
   const fileInputRef = useRef(null);
   const searchInputRef = useRef(null);
   const searchAbortControllerRef = useRef(null);
 
-  // Initial checks and loads
-  useEffect(() => {
-    checkHealth();
-    fetchFiles();
-  }, []);
+
 
   // Sync dark/light mode to body class and localStorage
   useEffect(() => {
@@ -196,6 +247,17 @@ function App() {
     return () => clearTimeout(timer);
   }, [logSearch]);
 
+  // Set default selected bookmark user ID to current user when logged in or usersList is fetched
+  useEffect(() => {
+    if (user && selectedBookmarkUserIds.length === 0) {
+      const currentUserFromList = usersList.find(u => u.username === user.username);
+      const currentUserId = currentUserFromList ? currentUserFromList.id : user.id;
+      if (currentUserId) {
+        setSelectedBookmarkUserIds([currentUserId]);
+      }
+    }
+  }, [user, usersList]);
+
   // Initial preview trigger when files list is first loaded
   useEffect(() => {
     if (searchQuery.trim() === '' && filesList.length > 0 && !selectedFileId) {
@@ -203,12 +265,12 @@ function App() {
     }
   }, [filesList]);
 
-  // Fetch bookmarks when bookmarks tab is active
+  // Fetch bookmarks when bookmarks tab is active or selected user filter/IDs changes
   useEffect(() => {
     if (activeTab === 'bookmarks') {
       fetchBookmarks();
     }
-  }, [activeTab]);
+  }, [activeTab, selectedUserFilterForBookmarks, selectedBookmarkUserIds]);
 
   // Debounced search trigger / Auto preview trigger (re-runs when searchQuery, filterSheet, or filterUnit changes)
   useEffect(() => {
@@ -247,7 +309,7 @@ function App() {
   // Check backend & DB status
   const checkHealth = async () => {
     try {
-      const res = await fetch('/api/health');
+      const res = await apiFetch('/api/health');
       const data = await res.json();
       setDbConnected(data.status === 'ok' && data.database === 'connected');
     } catch (err) {
@@ -269,6 +331,348 @@ function App() {
     setToasts(prev => prev.map(t => t.id === id ? { ...t, exiting: true } : t));
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 350);
   };
+
+  const handleLogout = useCallback(async () => {
+    // Notify backend for audit log (fire-and-forget, don't wait)
+    try {
+      const currentToken = localStorage.getItem('app_token');
+      if (currentToken) {
+        fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${currentToken}` }
+        }).catch(() => {});
+      }
+    } catch (_) {}
+
+    localStorage.removeItem('app_token');
+    localStorage.removeItem('app_user');
+    setToken(null);
+    setUser(null);
+    setActiveTab('search');
+    showToast('🔑 Logout Sukses', 'Sesi Anda telah diakhiri.', 'info');
+  }, [showToast]);
+
+  const apiFetch = useCallback(async (url, options = {}) => {
+    const headers = {
+      ...options.headers,
+    };
+    const currentToken = localStorage.getItem('app_token');
+    if (currentToken) {
+      headers['Authorization'] = `Bearer ${currentToken}`;
+    }
+    
+    try {
+      const res = await fetch(url, {
+        ...options,
+        headers,
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        if (!url.includes('/api/health') && !url.includes('/api/auth/login')) {
+          handleLogout();
+        }
+      }
+      return res;
+    } catch (err) {
+      console.error(`API Fetch Error (${url}):`, err);
+      throw err;
+    }
+  }, [handleLogout]);
+
+  const fetchUsers = useCallback(async () => {
+    setLoadingUsers(true);
+    try {
+      const res = await apiFetch('/api/users');
+      if (res.ok) {
+        const data = await res.json();
+        setUsersList(data);
+      }
+    } catch (err) {
+      console.error('Gagal mengambil daftar pengguna:', err);
+    } finally {
+      setLoadingUsers(false);
+    }
+  }, [apiFetch]);
+
+  const handleCreateUser = async (e) => {
+    e.preventDefault();
+    if (!newUsername.trim() || !newPassword) {
+      showToast('⚠️ Peringatan', 'Username dan Password wajib diisi.', 'warning');
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: newUsername.trim(), password: newPassword, role: newUserRole, full_name: newFullName.trim() || undefined })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal membuat pengguna.');
+      }
+      showToast('👤 Akun Dibuat', `Akun "${data.username}"${data.full_name ? ` (${data.full_name})` : ''} berhasil didaftarkan.`, 'success');
+      setNewUsername('');
+      setNewPassword('');
+      setNewFullName('');
+      setNewUserRole('viewer');
+      fetchUsers();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
+
+  const handleUpdateUser = async (e) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    if (!newUsername.trim()) {
+      showToast('⚠️ Peringatan', 'Username wajib diisi.', 'warning');
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/users/${editingUser.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: newUsername.trim(),
+          password: newPassword ? newPassword : undefined,
+          role: newUserRole,
+          full_name: newFullName.trim() || null
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal memperbarui pengguna.');
+      }
+      showToast('👤 Akun Diperbarui', `Akun "${data.username}" berhasil diperbarui.`, 'success');
+      setNewUsername('');
+      setNewPassword('');
+      setNewFullName('');
+      setNewUserRole('viewer');
+      setEditingUser(null);
+      fetchUsers();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
+
+  const startEditUser = (u) => {
+    setEditingUser(u);
+    setNewUsername(u.username);
+    setNewFullName(u.full_name || '');
+    setNewUserRole(u.role);
+    setNewPassword('');
+  };
+
+  const cancelEditUser = () => {
+    setEditingUser(null);
+    setNewUsername('');
+    setNewFullName('');
+    setNewUserRole('viewer');
+    setNewPassword('');
+  };
+
+  const handleDeleteUser = async (userId, username) => {
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus akun "${username}"?`)) {
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/users/${userId}`, {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menghapus pengguna.');
+      }
+      showToast('🗑️ Akun Dihapus', `Akun "${username}" berhasil dihapus.`, 'success');
+      fetchUsers();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
+
+  const fetchUserBookmarks = async (targetUser) => {
+    setSelectedUserForBookmarks(targetUser);
+    setLoadingUserBookmarks(true);
+    try {
+      const res = await apiFetch(`/api/bookmarks?userId=${targetUser.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        setUserBookmarksList(data.bookmarks || []);
+      }
+    } catch (err) {
+      console.error('Gagal mengambil bookmark pengguna:', err);
+    } finally {
+      setLoadingUserBookmarks(false);
+    }
+  };
+
+  const handleDeleteUserBookmark = async (rowId) => {
+    if (!selectedUserForBookmarks) return;
+    if (!window.confirm('Apakah Anda yakin ingin menghapus bookmark ini dari akun pengguna?')) return;
+    try {
+      const res = await apiFetch(`/api/bookmarks/${rowId}?userId=${selectedUserForBookmarks.id}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showToast('🗑️ Bookmark Dihapus', `Bookmark berhasil dihapus dari akun "${selectedUserForBookmarks.username}".`, 'success');
+        // Refresh list
+        const res2 = await apiFetch(`/api/bookmarks?userId=${selectedUserForBookmarks.id}`);
+        if (res2.ok) {
+          const data2 = await res2.json();
+          setUserBookmarksList(data2.bookmarks || []);
+        }
+      }
+    } catch (err) {
+      showToast('⚠️ Gagal', 'Gagal menghapus bookmark.', 'error');
+    }
+  };
+
+  const handleClearUserBookmarks = async () => {
+    if (!selectedUserForBookmarks) return;
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus seluruh bookmark (${userBookmarksList.length} item) dari akun "${selectedUserForBookmarks.username}"?`)) return;
+    try {
+      const res = await apiFetch(`/api/bookmarks?userId=${selectedUserForBookmarks.id}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        showToast('🗑️ Bookmark Dibersihkan', `Seluruh bookmark milik "${selectedUserForBookmarks.username}" berhasil dihapus.`, 'success');
+        setUserBookmarksList([]);
+        // Refresh local bookmarks list as well if it's the current user
+        if (selectedUserForBookmarks.id === user.id) {
+          fetchBookmarks();
+        }
+      }
+    } catch (err) {
+      showToast('⚠️ Gagal', 'Gagal membersihkan bookmark.', 'error');
+    }
+  };
+
+  const handleUpdateBookmark = async (e) => {
+    e.preventDefault();
+    if (!editingBookmark) return;
+
+    try {
+      let targetUserId = user.id;
+      if (selectedUserForBookmarks) {
+        targetUserId = selectedUserForBookmarks.id;
+      } else if (editingBookmark.owner_id) {
+        targetUserId = editingBookmark.owner_id;
+      }
+
+      // 1. Update Notes of bookmark
+      const bookmarkRes = await apiFetch(`/api/bookmarks/${editingBookmark.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: editingBookmarkNotes, group_name: editingBookmarkGroup, userId: targetUserId })
+      });
+
+      if (!bookmarkRes.ok) {
+        const errorData = await bookmarkRes.json();
+        throw new Error(errorData.error || 'Gagal memperbarui catatan bookmark.');
+      }
+
+      // 2. Update Row Data of document
+      const rowRes = await apiFetch(`/api/document-rows/${editingBookmark.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ row_data: editingBookmarkRowData })
+      });
+
+      if (!rowRes.ok) {
+        const errorData = await rowRes.json();
+        throw new Error(errorData.error || 'Gagal memperbarui data baris dokumen.');
+      }
+
+      showToast('✅ Berhasil Diperbarui', 'Bookmark dan data baris dokumen berhasil diperbarui.', 'success');
+      setEditingBookmark(null);
+      
+      // Refresh lists
+      if (selectedUserForBookmarks) {
+        const res = await apiFetch(`/api/bookmarks?userId=${selectedUserForBookmarks.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          setUserBookmarksList(data.bookmarks || []);
+        }
+      }
+      fetchBookmarks();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/notifications');
+      if (res.ok) {
+        const data = await res.json();
+        setNotificationsList(data.notifications || []);
+      }
+    } catch (err) {
+      console.error('Gagal memuat notifikasi:', err);
+    }
+  }, [apiFetch]);
+
+  const handleBroadcastNotification = async (e) => {
+    e.preventDefault();
+    if (!broadcastMessage.trim()) {
+      showToast('⚠️ Peringatan', 'Pesan notifikasi wajib diisi.', 'warning');
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          message: broadcastMessage.trim(),
+          recipientId: broadcastRecipient
+        })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Gagal mengirim notifikasi.');
+      }
+      
+      const successMsg = broadcastRecipient === 'all' 
+        ? 'Notifikasi berhasil dikirim ke semua akun.'
+        : 'Notifikasi berhasil dikirim ke akun penerima yang dituju.';
+        
+      showToast('📢 Notifikasi Dikirim', successMsg, 'success');
+      setBroadcastMessage('');
+      setBroadcastRecipient('all');
+      fetchNotifications();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
+
+  const handleMarkAsRead = async (notifId = null) => {
+    try {
+      const res = await apiFetch('/api/notifications/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notificationId: notifId })
+      });
+      if (res.ok) {
+        fetchNotifications();
+      }
+    } catch (err) {
+      console.error('Gagal menandai notifikasi dibaca:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (token) {
+      fetchNotifications();
+      const interval = setInterval(fetchNotifications, 15000);
+      return () => clearInterval(interval);
+    }
+  }, [token, fetchNotifications]);
+
+  useEffect(() => {
+    if (user?.role === 'admin' && (activeTab === 'users' || activeTab === 'bookmarks')) {
+      fetchUsers();
+    }
+  }, [activeTab, user, fetchUsers]);
 
   // Share link
   const handleShareLink = () => {
@@ -306,7 +710,7 @@ function App() {
   const fetchDashboard = async () => {
     setLoadingDashboard(true);
     try {
-      const res = await fetch('/api/stats');
+      const res = await apiFetch('/api/stats');
       if (res.ok) {
         const data = await res.json();
         setDashboardStats(data);
@@ -318,11 +722,79 @@ function App() {
     }
   };
 
+  // Reset dashboard statistics (Admin only)
+  const handleResetStats = async () => {
+    if (!window.confirm("Apakah Anda yakin ingin mereset seluruh data statistik dan riwayat log aktivitas? Tindakan ini tidak dapat dibatalkan.")) {
+      return;
+    }
+    
+    try {
+      const res = await apiFetch('/api/stats/reset', {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast('🗑️ Sukses Reset', data.message || 'Statistik berhasil direset.', 'success');
+        fetchDashboard();
+      } else {
+        showToast('⚠️ Gagal', data.error || 'Gagal mereset statistik.', 'error');
+      }
+    } catch (err) {
+      showToast('⚠️ Error', err.message, 'error');
+    }
+  };
+
+  // Reset / clear system activity logs (Admin only)
+  const handleClearLogs = async () => {
+    if (!window.confirm("Apakah Anda yakin ingin menghapus/reset seluruh riwayat log aktivitas sistem? Tindakan ini tidak dapat dibatalkan.")) {
+      return;
+    }
+    
+    try {
+      const res = await apiFetch('/api/logs', {
+        method: 'DELETE'
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast('🗑️ Sukses Reset', data.message || 'Log aktivitas berhasil direset.', 'success');
+        setLogPage(1);
+        fetchLogs(logSearch, 1, logLimit);
+      } else {
+        showToast('⚠️ Gagal', data.error || 'Gagal mereset log aktivitas.', 'error');
+      }
+    } catch (err) {
+      showToast('⚠️ Error', err.message, 'error');
+    }
+  };
+
+  // Get user profile details
+  const fetchUserProfile = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/auth/me');
+      if (res.ok) {
+        const data = await res.json();
+        setUser(data);
+        localStorage.setItem('app_user', JSON.stringify(data));
+      }
+    } catch (err) {
+      console.error('Gagal mengambil data profil pengguna:', err);
+    }
+  }, [apiFetch]);
+
+  // Initial checks and loads - placed below helpers to avoid TDZ
+  useEffect(() => {
+    checkHealth();
+    if (token) {
+      fetchUserProfile();
+      fetchFiles();
+    }
+  }, [token, fetchUserProfile]);
+
   // Get list of uploaded files
   const fetchFiles = async () => {
     setLoadingFiles(true);
     try {
-      const res = await fetch('/api/files');
+      const res = await apiFetch('/api/files');
       if (res.ok) {
         const data = await res.json();
         setFilesList(data.files);
@@ -349,7 +821,7 @@ function App() {
     try {
       const params = new URLSearchParams({ page, limit });
       if (q) params.append('q', q);
-      const res = await fetch(`/api/logs?${params}`);
+      const res = await apiFetch(`/api/logs?${params}`);
       if (res.ok) {
         const data = await res.json();
         setLogs(data.logs || []);
@@ -400,8 +872,11 @@ function App() {
       const params = new URLSearchParams({ fileId });
       if (sheet) params.append('sheet', sheet);
       if (unit) params.append('unit', unit);
+      if (user?.role === 'admin' && searchUploaderFilter !== 'all') {
+        params.append('uploaderId', searchUploaderFilter);
+      }
 
-      const res = await fetch(`/api/search?${params}`);
+      const res = await apiFetch(`/api/search?${params}`);
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
@@ -438,8 +913,11 @@ function App() {
       const params = new URLSearchParams({ q: searchQuery });
       if (filterSheet) params.append('sheet', filterSheet);
       if (filterUnit) params.append('unit', filterUnit);
+      if (user?.role === 'admin' && searchUploaderFilter !== 'all') {
+        params.append('uploaderId', searchUploaderFilter);
+      }
 
-      const res = await fetch(`/api/search?${params}`, {
+      const res = await apiFetch(`/api/search?${params}`, {
         signal: controller.signal
       });
       if (res.ok) {
@@ -564,10 +1042,21 @@ function App() {
   };
 
   // Fetch bookmarked rows from server
-  const fetchBookmarks = async () => {
+  const fetchBookmarks = async (targetUserId = null) => {
     setLoadingBookmarks(true);
     try {
-      const res = await fetch('/api/bookmarks');
+      let userIdParam = '';
+      if (targetUserId !== null) {
+        userIdParam = `?userId=${targetUserId}`;
+      } else if (user?.role === 'admin') {
+        if (selectedBookmarkUserIds.length > 0) {
+          userIdParam = `?userId=${selectedBookmarkUserIds.join(',')}`;
+        } else {
+          userIdParam = '?userId=mine';
+        }
+      }
+      
+      const res = await apiFetch(`/api/bookmarks${userIdParam}`);
       if (res.ok) {
         const data = await res.json();
         setBookmarksList(data.bookmarks || []);
@@ -580,36 +1069,116 @@ function App() {
   };
 
   // Toggle row bookmark state
-  const handleToggleBookmark = async (rowId, currentStatus) => {
+  const handleToggleBookmark = async (rowId, currentStatus, targetUserId = null) => {
     try {
-      const method = currentStatus ? 'DELETE' : 'POST';
-      const url = currentStatus ? `/api/bookmarks/${rowId}` : '/api/bookmarks';
-      const body = currentStatus ? null : JSON.stringify({ rowId });
+      if (currentStatus) {
+        // Deleting bookmark
+        let userIdParam = '';
+        let activeUserId = targetUserId;
+        if (!activeUserId && user?.role === 'admin') {
+          if (selectedBookmarkUserIds.length === 1) {
+            activeUserId = selectedBookmarkUserIds[0];
+          }
+        }
+        if (user?.role === 'admin' && activeUserId) {
+          userIdParam = `?userId=${activeUserId}`;
+        }
+        const url = `/api/bookmarks/${rowId}${userIdParam}`;
+        const res = await apiFetch(url, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        if (res.ok) {
+          setSearchResults(prev => prev.map(file => ({
+            ...file,
+            matches: file.matches.map(m => m.id === rowId ? { ...m, isBookmarked: false } : m)
+          })));
+          fetchBookmarks();
+          showToast('⭐ Bookmark Dihapus', 'Baris dokumen berhasil dihapus dari bookmark.', 'success');
+        }
+        return;
+      }
 
-      const res = await fetch(url, {
-        method,
+      // Adding bookmark - show beautiful React modal
+      setBookmarkGroupModalRowId(rowId);
+      setBookmarkGroupModalCurrentStatus(currentStatus);
+      setBookmarkGroupModalTargetUserId(targetUserId);
+
+      // Extract existing categories to show in dropdown
+      const existingGroups = new Set();
+      bookmarksList.forEach(b => {
+        if (b.group_name) {
+          existingGroups.add(b.group_name);
+        }
+      });
+      const groupsList = Array.from(existingGroups).filter(g => g !== 'Semua');
+      
+      if (groupsList.length > 0) {
+        setBookmarkGroupModalSelectedExisting(groupsList[0]);
+        setBookmarkGroupModalSelectedOption('existing');
+      } else {
+        setBookmarkGroupModalSelectedExisting('Umum');
+        setBookmarkGroupModalSelectedOption('new');
+        setBookmarkGroupModalNewInput('Umum');
+      }
+      setBookmarkGroupModalNewInput('');
+      setShowBookmarkGroupModal(true);
+    } catch (err) {
+      console.error('Gagal toggle bookmark:', err);
+      showToast('⚠️ Gagal', 'Gagal memproses bookmark.', 'error');
+    }
+  };
+
+  const handleConfirmBookmarkToggle = async () => {
+    const rowId = bookmarkGroupModalRowId;
+    const targetUserId = bookmarkGroupModalTargetUserId;
+
+    let chosenGroup = 'Umum';
+    if (bookmarkGroupModalSelectedOption === 'existing') {
+      chosenGroup = bookmarkGroupModalSelectedExisting;
+    } else {
+      chosenGroup = bookmarkGroupModalNewInput.trim() !== '' ? bookmarkGroupModalNewInput.trim() : 'Umum';
+    }
+
+    try {
+      let userIdParam = '';
+      let activeUserId = targetUserId;
+      if (!activeUserId && user?.role === 'admin') {
+        if (selectedBookmarkUserIds.length === 1) {
+          activeUserId = selectedBookmarkUserIds[0];
+        }
+      }
+      if (user?.role === 'admin' && activeUserId) {
+        userIdParam = `?userId=${activeUserId}`;
+      }
+      
+      const url = `/api/bookmarks${userIdParam}`;
+      const body = JSON.stringify({ 
+        rowId, 
+        userId: (user?.role === 'admin' && activeUserId) ? activeUserId : null,
+        group_name: chosenGroup
+      });
+
+      const res = await apiFetch(url, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body
       });
 
       if (res.ok) {
-        // Toggle locally in searchResults
         setSearchResults(prev => prev.map(file => ({
           ...file,
-          matches: file.matches.map(m => m.id === rowId ? { ...m, isBookmarked: !currentStatus } : m)
+          matches: file.matches.map(m => m.id === rowId ? { ...m, isBookmarked: true } : m)
         })));
-
-        // If bookmarks list is active or displayed, refresh it
         fetchBookmarks();
-        showToast(
-          currentStatus ? '⭐ Bookmark Dihapus' : '⭐ Tersimpan ke Bookmark',
-          currentStatus ? 'Baris dokumen berhasil dihapus dari bookmark.' : 'Baris dokumen berhasil disimpan.',
-          'success'
-        );
+        setShowBookmarkGroupModal(false);
+        showToast('⭐ Tersimpan ke Bookmark', `Baris dokumen disimpan ke kategori "${chosenGroup}".`, 'success');
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Gagal menyimpan bookmark.');
       }
     } catch (err) {
-      console.error('Gagal toggle bookmark:', err);
-      showToast('⚠️ Gagal', 'Gagal memproses bookmark.', 'error');
+      showToast('⚠️ Gagal', err.message || 'Gagal memproses bookmark.', 'error');
     }
   };
 
@@ -627,7 +1196,7 @@ function App() {
     }
 
     try {
-      const res = await fetch('/api/files/bulk-delete', {
+      const res = await apiFetch('/api/files/bulk-delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: selectedFileIds })
@@ -655,7 +1224,7 @@ function App() {
     }
 
     try {
-      const res = await fetch(`/api/files/${id}`, { method: 'DELETE' });
+      const res = await apiFetch(`/api/files/${id}`, { method: 'DELETE' });
       if (res.ok) {
         showToast('🗑️ File Dihapus', `Berkas "${filename}" berhasil dihapus.`, 'success');
         setSelectedFileId(null);
@@ -715,7 +1284,7 @@ function App() {
 
     try {
       // 1. Initial POST request
-      const res = await fetch('/api/upload', {
+      const res = await apiFetch('/api/upload', {
         method: 'POST',
         body: formData,
       });
@@ -732,7 +1301,7 @@ function App() {
       // 2. Poll status endpoint until completed or failed
       const pollInterval = setInterval(async () => {
         try {
-          const statusRes = await fetch(`/api/upload/status/${jobId}`);
+          const statusRes = await apiFetch(`/api/upload/status/${jobId}`);
           if (!statusRes.ok) {
             clearInterval(pollInterval);
             setUploading(false);
@@ -914,6 +1483,18 @@ function App() {
   const activeHeaders = getActiveFileHeaders();
   const selectedFileData = searchResults.find(f => f.fileId === selectedFileId);
 
+  if (!token || !user) {
+    return (
+      <LoginScreen 
+        setToken={setToken} 
+        setUser={setUser} 
+        isDarkMode={isDarkMode} 
+        setIsDarkMode={setIsDarkMode} 
+        showToast={showToast}
+      />
+    );
+  }
+
   return (
     <div className="app-container">
       {/* Dynamic Header */}
@@ -928,10 +1509,14 @@ function App() {
         
         {/* Status & Stats info */}
         <div className="header-meta">
-          <div className="stats-badge">
+          <div className="stats-badge" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
             <span className="stats-item">📁 <strong>{stats.totalFiles}</strong> File</span>
             <span className="stats-divider">|</span>
-            <span className="stats-item">⚡ <strong>{stats.totalRows.toLocaleString('id-ID')}</strong> Baris Data</span>
+            <span className="stats-item">⚡ <strong>{stats.totalRows.toLocaleString('id-ID')}</strong> Baris</span>
+            <span className="stats-divider">|</span>
+            <span className="stats-item" style={{ color: 'var(--text-secondary)' }}>
+              📅 {currentTime.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })} • ⏰ {currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+            </span>
           </div>
           
           {/* Theme Toggle */}
@@ -942,6 +1527,76 @@ function App() {
           >
             {isDarkMode ? '☀️ Terang' : '🌙 Gelap'}
           </button>
+
+          {/* Notification Bell */}
+          <div className="notification-container" style={{ position: 'relative' }}>
+            <button 
+              className="notification-bell-btn"
+              onClick={() => setShowNotificationsDropdown(!showNotificationsDropdown)}
+              title="Notifikasi"
+            >
+              🔔
+              {notificationsList.filter(n => !n.is_read).length > 0 && (
+                <span className="notification-badge">
+                  {notificationsList.filter(n => !n.is_read).length}
+                </span>
+              )}
+            </button>
+
+            {showNotificationsDropdown && (
+              <div className="notification-dropdown">
+                <div className="notification-dropdown-header">
+                  <h4>Notifikasi Global</h4>
+                  {notificationsList.filter(n => !n.is_read).length > 0 && (
+                    <button 
+                      className="mark-all-read-btn"
+                      onClick={() => handleMarkAsRead()}
+                    >
+                      Tandai semua dibaca
+                    </button>
+                  )}
+                </div>
+                <div className="notification-dropdown-list">
+                  {notificationsList.length === 0 ? (
+                    <div className="no-notifications">Tidak ada notifikasi baru</div>
+                  ) : (
+                    notificationsList.map(n => (
+                      <div 
+                        key={n.id} 
+                        className={`notification-item ${!n.is_read ? 'unread' : ''}`}
+                        onClick={() => handleMarkAsRead(n.id)}
+                      >
+                        <div className="notification-status-dot"></div>
+                        <div className="notification-item-content">
+                          <p className="notification-message">{n.message}</p>
+                          <span className="notification-time">
+                            {new Date(n.created_at).toLocaleString('id-ID')}
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Logged in User info */}
+          <div className="user-profile-badge">
+            <span className="user-avatar" style={{ fontSize: '1.2rem' }}>👤</span>
+            <div className="user-info-text">
+              <span style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                {getGreeting()}
+              </span>
+              <span className="username-label" style={{ fontWeight: '700' }} title={user.username}>
+                {user.full_name || user.username}
+              </span>
+              <span className="role-label">{user.role.toUpperCase()}</span>
+            </div>
+            <button className="logout-btn" onClick={handleLogout} title="Keluar dari Aplikasi">
+              🚪 Keluar
+            </button>
+          </div>
 
           <div className={`db-status-pill ${dbConnected ? 'connected' : 'disconnected'}`}>
             <span className="dot"></span>
@@ -964,30 +1619,46 @@ function App() {
         >
           ⭐ Bookmark ({bookmarksList.length})
         </button>
-        <button 
-          className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
-          onClick={() => setActiveTab('upload')}
-        >
-          📤 Unggah Excel
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`}
-          onClick={() => setActiveTab('files')}
-        >
-          ⚙️ Kelola File ({filesList.length})
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`}
-          onClick={() => setActiveTab('logs')}
-        >
-          📜 Log Aktivitas
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
-          onClick={() => { setActiveTab('dashboard'); fetchDashboard(); }}
-        >
-          📊 Dashboard
-        </button>
+        {(user.role === 'admin' || user.role === 'operator') && (
+          <button 
+            className={`tab-btn ${activeTab === 'upload' ? 'active' : ''}`}
+            onClick={() => setActiveTab('upload')}
+          >
+            📤 Unggah Excel
+          </button>
+        )}
+        {(user.role === 'admin' || user.role === 'operator') && (
+          <button 
+            className={`tab-btn ${activeTab === 'files' ? 'active' : ''}`}
+            onClick={() => setActiveTab('files')}
+          >
+            ⚙️ Kelola File ({filesList.length})
+          </button>
+        )}
+        {user.role === 'admin' && (
+          <button 
+            className={`tab-btn ${activeTab === 'logs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('logs')}
+          >
+            📜 Log Aktivitas
+          </button>
+        )}
+        {user.role === 'admin' && (
+          <button 
+            className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => { setActiveTab('dashboard'); fetchDashboard(); }}
+          >
+            📊 Dashboard
+          </button>
+        )}
+        {user.role === 'admin' && (
+          <button 
+            className={`tab-btn ${activeTab === 'users' ? 'active' : ''}`}
+            onClick={() => setActiveTab('users')}
+          >
+            👥 Kelola Pengguna
+          </button>
+        )}
       </nav>
 
       {/* Main Content Area */}
@@ -1043,10 +1714,54 @@ function App() {
                     onChange={(e) => setFilterUnit(e.target.value)}
                   />
                 </div>
-                {(filterSheet || filterUnit) && (
+                {user?.role === 'admin' && (
+                  <div className="filter-group">
+                    <label>Saring Pengunggah:</label>
+                    <select
+                      className="filter-input-field"
+                      style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', color: '#fff', padding: '0.55rem', borderRadius: '6px', fontSize: '0.85rem', cursor: 'pointer' }}
+                      value={searchUploaderFilter}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setSearchUploaderFilter(val);
+                        if (searchQuery.trim() !== '') {
+                          setTimeout(() => {
+                            handleSearch();
+                          }, 50);
+                        } else {
+                          const filtered = filesList.filter(f => val === 'all' || String(f.uploaded_by) === String(val));
+                          if (filtered.length > 0) {
+                            const isStillValid = filtered.some(f => f.id === selectedFileId);
+                            if (!isStillValid) {
+                              setSelectedFileId(filtered[0].id);
+                              fetchFilePreview(filtered[0].id);
+                            }
+                          } else {
+                            setSelectedFileId(null);
+                          }
+                        }
+                      }}
+                    >
+                      <option value="all">📁 Semua Pengunggah</option>
+                      {usersList.map(u => (
+                        <option key={u.id} value={u.id}>
+                          👤 {u.full_name ? `${u.full_name} (${u.username})` : u.username}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {(filterSheet || filterUnit || (user?.role === 'admin' && searchUploaderFilter !== 'all')) && (
                   <button
                     className="clear-filters-btn"
-                    onClick={() => { setFilterSheet(''); setFilterUnit(''); }}
+                    onClick={() => { 
+                      setFilterSheet(''); 
+                      setFilterUnit(''); 
+                      setSearchUploaderFilter('all');
+                      if (searchQuery.trim() !== '') {
+                        setTimeout(() => { handleSearch(); }, 50);
+                      }
+                    }}
                   >
                     Reset Filter
                   </button>
@@ -1100,27 +1815,58 @@ function App() {
                   </h3>
                   <div className="file-tabs">
                     {searchQuery.trim() === '' ? (
-                      filesList.map(file => (
-                        <button
-                          key={file.id}
-                          className={`file-tab-btn ${selectedFileId === file.id ? 'active' : ''}`}
-                          onClick={() => handleFileTabClick(file.id)}
-                        >
-                          <div className="file-tab-name">📄 {file.filename}</div>
-                          <div className="file-tab-badge">⚡ {file.row_count} baris</div>
-                        </button>
-                      ))
+                      (() => {
+                        const displayedFiles = filesList.filter(f => {
+                          if (searchUploaderFilter === 'all') return true;
+                          return String(f.uploaded_by) === String(searchUploaderFilter);
+                        });
+                        if (displayedFiles.length === 0) {
+                          return <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontStyle: 'italic', padding: '1rem', textAlign: 'center' }}>Tidak ada dokumen dari pengunggah ini.</div>;
+                        }
+                        return displayedFiles.map(file => (
+                          <button
+                            key={file.id}
+                            className={`file-tab-btn ${selectedFileId === file.id ? 'active' : ''}`}
+                            onClick={() => handleFileTabClick(file.id)}
+                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '4px' }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '8px' }}>
+                              <div className="file-tab-name">📄 {file.filename}</div>
+                              <div className="file-tab-badge">⚡ {file.row_count} baris</div>
+                            </div>
+                            {user?.role === 'admin' && (
+                              <div style={{ fontSize: '0.68rem', opacity: 0.75, textAlign: 'left', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '3px', color: 'var(--accent-secondary)' }}>
+                                👤 Pengunggah: {file.uploader_fullname || file.uploader_username || 'Sistem'}
+                              </div>
+                            )}
+                          </button>
+                        ));
+                      })()
                     ) : (
-                      searchResults.map(file => (
-                        <button
-                          key={file.fileId}
-                          className={`file-tab-btn ${selectedFileId === file.fileId ? 'active' : ''}`}
-                          onClick={() => handleFileTabClick(file.fileId)}
-                        >
-                          <div className="file-tab-name">📄 {file.filename}</div>
-                          <div className="file-tab-badge">{file.matches.length} baris cocok</div>
-                        </button>
-                      ))
+                      searchResults.map(file => {
+                        // Find uploader info from filesList
+                        const fileMeta = filesList.find(f => f.id === file.fileId);
+                        const uploaderName = fileMeta ? (fileMeta.uploader_fullname || fileMeta.uploader_username || 'Sistem') : 'Sistem';
+                        
+                        return (
+                          <button
+                            key={file.fileId}
+                            className={`file-tab-btn ${selectedFileId === file.fileId ? 'active' : ''}`}
+                            onClick={() => handleFileTabClick(file.fileId)}
+                            style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '4px' }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '8px' }}>
+                              <div className="file-tab-name">📄 {file.filename}</div>
+                              <div className="file-tab-badge">{file.matches.length} baris cocok</div>
+                            </div>
+                            {user?.role === 'admin' && (
+                              <div style={{ fontSize: '0.68rem', opacity: 0.75, textAlign: 'left', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: '3px', color: 'var(--accent-secondary)' }}>
+                                👤 Pengunggah: {uploaderName}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })
                     )}
                   </div>
                 </div>
@@ -1298,7 +2044,7 @@ function App() {
                                 {selectedFileData.matches.length} baris
                               </span>
                             </div>
-                            <div className="table-responsive">
+                            <DragScrollContainer className="table-responsive">
                               <table className="excel-table">
                                 <thead>
                                   <tr>
@@ -1340,7 +2086,7 @@ function App() {
                                   ))}
                                 </tbody>
                               </table>
-                            </div>
+                            </DragScrollContainer>
                           </>
                         );
                       })()}
@@ -1379,10 +2125,154 @@ function App() {
         {/* TAB 1b: BOOKMARKS */}
         {activeTab === 'bookmarks' && (
           <div className="bookmarks-tab-content">
-            <div className="dashboard-header">
-              <h2>⭐ Data Bookmark</h2>
-              <p>Daftar baris data spreadsheet penting yang Anda simpan untuk referensi cepat.</p>
+            <div className="dashboard-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '1.25rem', marginBottom: '1.75rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <h2 style={{ margin: 0, fontSize: '1.6rem', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>⭐</span>
+                  <span style={{ background: 'linear-gradient(135deg, #fff 0%, #a78bfa 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                    Data Bookmark
+                  </span>
+                </h2>
+                <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.4', maxWidth: '550px' }}>
+                  Daftar baris data spreadsheet penting yang disimpan untuk referensi cepat.
+                </p>
+              </div>
+              
+              {user?.role === 'admin' && (
+                <div className="bookmark-user-selector-container" style={{ position: 'relative' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <label style={{ fontSize: '0.85rem', fontWeight: '600', color: 'var(--text-secondary)' }}>Rekap Bookmark:</label>
+                    <button
+                      type="button"
+                      className="column-filter-trigger-btn"
+                      onClick={() => setShowUserFilterDropdown(!showUserFilterDropdown)}
+                      style={{ padding: '0.5rem 1rem', background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: '#fff', fontSize: '0.88rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      👥 Pilih Akun ({selectedBookmarkUserIds.length === 0 ? 'Hanya Admin Anda' : `${selectedBookmarkUserIds.length} Akun Terpilih`}) ▾
+                    </button>
+                  </div>
+                  
+                  {showUserFilterDropdown && (
+                    <div className="column-filter-dropdown" style={{ right: 0, width: '280px', top: '42px', zIndex: 110 }}>
+                      <div className="dropdown-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid var(--glass-border)' }}>
+                        <strong style={{ fontSize: '0.8rem' }}>Pilih Akun Pengguna</strong>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            type="button"
+                            className="mark-all-read-btn"
+                            onClick={() => {
+                              setSelectedBookmarkUserIds(usersList.map(u => u.id));
+                            }}
+                            style={{ fontSize: '0.72rem' }}
+                          >
+                            Pilih Semua
+                          </button>
+                          <span style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>|</span>
+                          <button
+                            type="button"
+                            className="mark-all-read-btn"
+                            onClick={() => {
+                              setSelectedBookmarkUserIds([]);
+                            }}
+                            style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}
+                          >
+                            Bersihkan
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <div className="dropdown-items" style={{ maxHeight: '200px', overflowY: 'auto', padding: '6px' }}>
+                        {usersList.map(u => {
+                          const isChecked = selectedBookmarkUserIds.includes(u.id);
+                          return (
+                            <label key={u.id} className="column-checkbox-label" style={{ display: 'flex', alignItems: 'center', padding: '6px 8px', borderRadius: '4px', cursor: 'pointer', transition: 'background 0.2s', gap: '8px', fontSize: '0.85rem' }}>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  if (isChecked) {
+                                    setSelectedBookmarkUserIds(prev => prev.filter(id => id !== u.id));
+                                  } else {
+                                    setSelectedBookmarkUserIds(prev => [...prev, u.id]);
+                                  }
+                                }}
+                              />
+                              <span style={{ color: u.username === user.username ? 'var(--accent-secondary)' : '#fff' }}>
+                                {u.username === user.username ? `⭐ ${u.username} (Anda)` : `👤 ${u.username}`}
+                              </span>
+                              <span className={`role-badge role-${u.role}`} style={{ fontSize: '0.65rem', padding: '1px 4px', borderRadius: '3px', marginLeft: 'auto' }}>
+                                {u.role.toUpperCase()}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            {editingBookmark && !selectedUserForBookmarks && (
+              <div className="bookmark-edit-form-wrapper" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '12px', padding: '1.5rem', marginBottom: '2rem' }}>
+                <h3 style={{ marginBottom: '1rem', fontSize: '1.1rem' }}>✏️ Edit Bookmark Baris #{editingBookmark.row_number} - {editingBookmark.filename}</h3>
+                <form onSubmit={handleUpdateBookmark}>
+                  <div className="form-group" style={{ marginBottom: '1rem' }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Nama Kategori / Grup Bookmark</label>
+                    <input
+                      type="text"
+                      value={editingBookmarkGroup}
+                      onChange={(e) => setEditingBookmarkGroup(e.target.value)}
+                      placeholder="Contoh: Keuangan, Penting, Umum, dll."
+                      style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: '#fff', fontSize: '0.88rem', marginBottom: '1rem' }}
+                    />
+                  </div>
+                  <div className="form-group" style={{ marginBottom: '1rem' }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Catatan / Keterangan Bookmark</label>
+                    <textarea
+                      value={editingBookmarkNotes}
+                      onChange={(e) => setEditingBookmarkNotes(e.target.value)}
+                      placeholder="Tambahkan catatan khusus untuk bookmark ini..."
+                      style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: '#fff', fontSize: '0.88rem', minHeight: '80px', fontFamily: 'inherit', resize: 'vertical' }}
+                    />
+                  </div>
+                  
+                  <div className="form-group" style={{ marginBottom: '1.5rem' }}>
+                    <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Konten Baris Dokumen (Key-Values)</label>
+                    <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '0.85rem', background: 'var(--bg-tertiary)' }}>
+                      {Object.entries(editingBookmarkRowData).map(([key, val]) => (
+                        <div key={key} style={{ display: 'flex', alignItems: 'center', marginBottom: '0.6rem', gap: '10px' }}>
+                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', width: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={key}>{key}:</span>
+                          <input
+                            type="text"
+                            value={String(val)}
+                            onChange={(e) => {
+                              const updatedVal = e.target.value;
+                              setEditingBookmarkRowData(prev => ({ ...prev, [key]: updatedVal }));
+                            }}
+                            style={{ flex: 1, padding: '0.4rem 0.75rem', background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem' }}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <button type="submit" className="btn-submit-user" style={{ padding: '0.55rem 1.25rem' }}>
+                      Simpan Perubahan
+                    </button>
+                    <button 
+                      type="button" 
+                      className="btn-delete-user" 
+                      onClick={() => setEditingBookmark(null)}
+                      style={{ padding: '0.55rem 1.25rem', background: 'rgba(255, 255, 255, 0.05)', borderColor: 'var(--glass-border)', color: 'var(--text-secondary)' }}
+                    >
+                      Batal
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
 
             {loadingBookmarks ? (
               <div className="search-loader">
@@ -1393,11 +2283,30 @@ function App() {
               <div className="empty-state">
                 <div className="empty-icon">⭐</div>
                 <h3>Belum ada bookmark</h3>
-                <p>Klik tombol bintang (☆) pada tabel hasil pencarian untuk menyimpan data penting di sini.</p>
+                <p>
+                  {selectedBookmarkUserIds.length === 1 && selectedBookmarkUserIds[0] === user.id
+                    ? 'Klik tombol bintang (☆) pada tabel hasil pencarian untuk menyimpan data penting di sini.'
+                    : 'Pengguna terpilih belum menyimpan berkas bookmark apa pun.'}
+                </p>
               </div>
             ) : (
               <div className="results-card">
                 {(() => {
+                  // Filter bookmarks by active group
+                  const filteredBookmarks = bookmarksList.filter(b => {
+                    if (activeBookmarkGroupFilter === 'Semua') return true;
+                    if (activeBookmarkGroupFilter === 'Umum') return !b.group_name || b.group_name === 'Umum';
+                    return b.group_name === activeBookmarkGroupFilter;
+                  });
+
+                  // Build unique list of groups/categories
+                  const uniqueGroups = new Set();
+                  uniqueGroups.add('Semua');
+                  bookmarksList.forEach(b => {
+                    uniqueGroups.add(b.group_name || 'Umum');
+                  });
+                  const categoriesList = Array.from(uniqueGroups);
+
                   // Find all headers across bookmarked rows
                   const allKeys = new Set();
                   bookmarksList.forEach(m => {
@@ -1416,6 +2325,43 @@ function App() {
 
                   return (
                     <>
+                      {/* Bookmark Category Filter Pills */}
+                      <div className="bookmark-category-tabs" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '1rem 1.25rem', marginBottom: '1rem', borderBottom: '1px solid var(--glass-border)', background: 'rgba(255, 255, 255, 0.02)', borderRadius: '8px' }}>
+                        <span style={{ alignSelf: 'center', fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-secondary)', marginRight: '8px' }}>📂 Kategori Bookmark:</span>
+                        {categoriesList.map(cat => {
+                          const count = bookmarksList.filter(b => {
+                            if (cat === 'Semua') return true;
+                            if (cat === 'Umum') return !b.group_name || b.group_name === 'Umum';
+                            return b.group_name === cat;
+                          }).length;
+                          
+                          return (
+                            <button
+                              key={cat}
+                              type="button"
+                              onClick={() => setActiveBookmarkGroupFilter(cat)}
+                              className={`tab-btn ${activeBookmarkGroupFilter === cat ? 'active' : ''}`}
+                              style={{ 
+                                padding: '0.35rem 0.8rem', 
+                                fontSize: '0.8rem', 
+                                borderRadius: '20px', 
+                                background: activeBookmarkGroupFilter === cat ? 'var(--accent-secondary)' : 'rgba(255,255,255,0.05)',
+                                color: activeBookmarkGroupFilter === cat ? '#fff' : 'var(--text-secondary)',
+                                border: '1px solid var(--glass-border)',
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                transition: 'all 0.2s ease'
+                              }}
+                            >
+                              <span>{cat}</span>
+                              <span style={{ fontSize: '0.72rem', opacity: 0.8, background: 'rgba(0,0,0,0.2)', padding: '1px 6px', borderRadius: '10px' }}>{count}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
                       <div className="results-card-header" style={{ marginBottom: '1.25rem' }}>
                         <div>
                           <h3 style={{ margin: 0, fontSize: '1.1rem' }}>📋 Filter & Tampilan Bookmark</h3>
@@ -1540,16 +2486,22 @@ function App() {
                               className="table-action-btn table-action-btn--export"
                               onClick={() => {
                                 const headers = [
+                                  ...(selectedBookmarkUserIds.length > 1 ? ['Pemilik'] : []),
+                                  'Kategori',
                                   ...(showFile ? ['File'] : []),
                                   ...(showSheet ? ['Sheet'] : []),
                                   ...(showBaris ? ['Baris'] : []),
-                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h))
+                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h)),
+                                  'Catatan'
                                 ];
-                                const rows = bookmarksList.map(m => [
+                                const rows = filteredBookmarks.map(m => [
+                                  ...(selectedBookmarkUserIds.length > 1 ? [m.owner_username || 'Sistem'] : []),
+                                  m.group_name || 'Umum',
                                   ...(showFile ? [m.filename] : []),
                                   ...(showSheet ? [m.sheet_name] : []),
                                   ...(showBaris ? [m.row_number] : []),
-                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? '')
+                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? ''),
+                                  m.notes ?? ''
                                 ]);
                                 const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
                                 const wb = XLSX.utils.book_new();
@@ -1559,22 +2511,28 @@ function App() {
                               }}
                               title="Unduh seluruh bookmark ke Excel"
                             >
-                              📥 Ekspor Excel ({bookmarksList.length})
+                              📥 Ekspor Excel ({filteredBookmarks.length})
                             </button>
                             <button
                               className="table-action-btn"
                               onClick={() => {
                                 const headers = [
+                                  ...(selectedBookmarkUserIds.length > 1 ? ['Pemilik'] : []),
+                                  'Kategori',
                                   ...(showFile ? ['File'] : []),
                                   ...(showSheet ? ['Sheet'] : []),
                                   ...(showBaris ? ['Baris'] : []),
-                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h))
+                                  ...orderedBookmarkHeaders.map(h => getColumnLabel(h)),
+                                  'Catatan'
                                 ];
-                                const rows = bookmarksList.map(m => [
+                                const rows = filteredBookmarks.map(m => [
+                                  ...(selectedBookmarkUserIds.length > 1 ? [m.owner_username || 'Sistem'] : []),
+                                  m.group_name || 'Umum',
                                   ...(showFile ? [m.filename] : []),
                                   ...(showSheet ? [m.sheet_name] : []),
                                   ...(showBaris ? [m.row_number] : []),
-                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? '')
+                                  ...orderedBookmarkHeaders.map(h => m.row_data[h] ?? ''),
+                                  m.notes ?? ''
                                 ]);
                                 const tableHTML = `
                                   <table border="1" cellspacing="0" cellpadding="6"
@@ -1597,50 +2555,95 @@ function App() {
                             >
                               🖨️ Cetak
                             </button>
-                            <span className="table-row-count">{bookmarksList.length} baris tersimpan</span>
+                            <span className="table-row-count">{filteredBookmarks.length} baris tersimpan</span>
                           </div>
 
-                          <div className="table-responsive">
-                            <table className="excel-table">
-                              <thead>
-                                <tr>
-                                  <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
-                                  {showFile && <th>Nama Berkas</th>}
-                                  {showSheet && <th>Sheet</th>}
-                                  {showBaris && <th>Baris</th>}
-                                  {orderedBookmarkHeaders.map(h => (
-                                    <th key={h}>{getColumnLabel(h)}</th>
-                                  ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {bookmarksList.map(match => (
-                                  <tr key={match.id}>
-                                    <td className="meta-cell text-center" style={{ width: '40px' }}>
-                                      <button
-                                        className="bookmark-star-btn active"
-                                        onClick={() => handleToggleBookmark(match.id, true)}
-                                        title="Hapus dari Bookmark"
-                                      >
-                                        ★
-                                      </button>
-                                    </td>
-                                    {showFile && <td className="meta-cell font-accent">{match.filename}</td>}
-                                    {showSheet && <td className="meta-cell">{match.sheet_name}</td>}
-                                    {showBaris && <td className="meta-cell text-center">{match.row_number}</td>}
-                                    {orderedBookmarkHeaders.map(h => {
-                                      const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
-                                      return (
-                                        <td key={h} className={isDesc ? 'description-cell' : ''}>
-                                          {match.row_data[h] ?? ''}
-                                        </td>
-                                      );
-                                    })}
+                          {filteredBookmarks.length === 0 ? (
+                            <div className="empty-state" style={{ padding: '3rem 1.5rem', background: 'rgba(255, 255, 255, 0.01)', border: '1px solid var(--glass-border)', borderRadius: '10px' }}>
+                              <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '0.9rem' }}>Tidak ada data bookmark dalam kategori "{activeBookmarkGroupFilter}".</p>
+                            </div>
+                          ) : (
+                            <DragScrollContainer className="table-responsive">
+                              <table className="excel-table">
+                                <thead>
+                                  <tr>
+                                    <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
+                                    {selectedBookmarkUserIds.length > 1 && <th>Pemilik</th>}
+                                    <th>Kategori</th>
+                                    {showFile && <th>Nama Berkas</th>}
+                                    {showSheet && <th>Sheet</th>}
+                                    {showBaris && <th>Baris</th>}
+                                    {orderedBookmarkHeaders.map(h => (
+                                      <th key={h}>{getColumnLabel(h)}</th>
+                                    ))}
+                                    <th>Catatan</th>
+                                    <th>Aksi</th>
                                   </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
+                                </thead>
+                                <tbody>
+                                  {filteredBookmarks.map(match => (
+                                    <tr key={match.id}>
+                                      <td className="meta-cell text-center" style={{ width: '40px' }}>
+                                        <button
+                                          className="bookmark-star-btn active"
+                                          onClick={() => handleToggleBookmark(match.id, true, match.owner_id)}
+                                          title="Hapus dari Bookmark"
+                                        >
+                                          ★
+                                        </button>
+                                      </td>
+                                      {selectedBookmarkUserIds.length > 1 && (
+                                        <td className="meta-cell">
+                                          <span className="role-badge role-admin" style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'rgba(139, 92, 246, 0.12)', border: '1px solid rgba(139, 92, 246, 0.25)', color: '#c084fc' }}>
+                                            👤 {match.owner_username || 'Sistem'}
+                                          </span>
+                                        </td>
+                                      )}
+                                      <td className="meta-cell">
+                                        <span className="role-badge role-viewer" style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem', borderRadius: '4px', display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'rgba(16, 185, 129, 0.12)', border: '1px solid rgba(16, 185, 129, 0.25)', color: '#34d399', fontWeight: 600 }}>
+                                          📂 {match.group_name || 'Umum'}
+                                        </span>
+                                      </td>
+                                      {showFile && <td className="meta-cell font-accent">{match.filename}</td>}
+                                      {showSheet && <td className="meta-cell">{match.sheet_name}</td>}
+                                      {showBaris && <td className="meta-cell text-center">{match.row_number}</td>}
+                                      {orderedBookmarkHeaders.map(h => {
+                                        const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
+                                        return (
+                                          <td key={h} className={isDesc ? 'description-cell' : ''}>
+                                            {match.row_data[h] ?? ''}
+                                          </td>
+                                        );
+                                      })}
+                                      <td>
+                                        {match.notes ? (
+                                          <span style={{ fontSize: '0.88rem' }}>{match.notes}</span>
+                                        ) : (
+                                          <span style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '0.8rem' }}>-</span>
+                                        )}
+                                      </td>
+                                      <td>
+                                        <button
+                                          type="button"
+                                          className="btn-edit-bookmark"
+                                          onClick={() => {
+                                            setEditingBookmark(match);
+                                            setEditingBookmarkNotes(match.notes || '');
+                                            setEditingBookmarkGroup(match.group_name || 'Umum');
+                                            setEditingBookmarkRowData({ ...match.row_data });
+                                          }}
+                                          title="Edit catatan, kategori & data baris bookmark"
+                                          style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                                        >
+                                          ✏️ Edit
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </DragScrollContainer>
+                          )}
                         </>
                       )}
                     </>
@@ -1763,7 +2766,7 @@ function App() {
                     <span>Pilih Semua ({filesList.length})</span>
                   </label>
                   
-                  {selectedFileIds.length > 0 && (
+                  {user.role === 'admin' && selectedFileIds.length > 0 && (
                     <button
                       className="bulk-delete-btn"
                       onClick={handleBulkDelete}
@@ -1775,21 +2778,23 @@ function App() {
 
                 <div className="files-grid">
                   {filesList.map(file => (
-                    <div key={file.id} className={`file-card ${selectedFileIds.includes(file.id) ? 'selected' : ''}`}>
-                      <div className="file-card-checkbox-wrapper">
-                        <input
-                          type="checkbox"
-                          className="file-select-checkbox"
-                          checked={selectedFileIds.includes(file.id)}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              setSelectedFileIds(prev => [...prev, file.id]);
-                            } else {
-                              setSelectedFileIds(prev => prev.filter(id => id !== file.id));
-                            }
-                          }}
-                        />
-                      </div>
+                    <div key={file.id} className={`file-card ${user.role === 'admin' && selectedFileIds.includes(file.id) ? 'selected' : ''}`}>
+                      {user.role === 'admin' && (
+                        <div className="file-card-checkbox-wrapper">
+                          <input
+                            type="checkbox"
+                            className="file-select-checkbox"
+                            checked={selectedFileIds.includes(file.id)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedFileIds(prev => [...prev, file.id]);
+                              } else {
+                                setSelectedFileIds(prev => prev.filter(id => id !== file.id));
+                              }
+                            }}
+                          />
+                        </div>
+                      )}
                       <div className="file-card-details">
                         <h3 className="file-card-title" title={file.filename}>📄 {file.filename}</h3>
                         <div className="file-card-meta">
@@ -1803,13 +2808,15 @@ function App() {
                           Diunggah: {new Date(file.uploaded_at).toLocaleString('id-ID')}
                         </p>
                       </div>
-                      <button 
-                        className="delete-file-btn" 
-                        onClick={() => handleDeleteFile(file.id, file.filename)}
-                        title="Hapus file dan seluruh datanya"
-                      >
-                        🗑️ Hapus
-                      </button>
+                      {user.role === 'admin' && (
+                        <button 
+                          className="delete-file-btn" 
+                          onClick={() => handleDeleteFile(file.id, file.filename)}
+                          title="Hapus file dan seluruh datanya"
+                        >
+                          🗑️ Hapus
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1822,14 +2829,32 @@ function App() {
         {activeTab === 'logs' && (
           <div className="logs-tab-content">
             {/* Header row */}
-            <div className="section-header-row">
-              <div>
-                <h2>📜 Log Aktivitas Sistem</h2>
-                <p className="subtitle">Riwayat audit pengunggahan, pencarian, dan penghapusan berkas.</p>
+            <div className="section-header-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '1.25rem', marginBottom: '1.75rem' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <h2 style={{ margin: 0, fontSize: '1.6rem', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span>📜</span>
+                  <span style={{ background: 'linear-gradient(135deg, #fff 0%, #a78bfa 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                    Log Aktivitas Sistem
+                  </span>
+                </h2>
+                <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.4', maxWidth: '550px' }}>
+                  Riwayat audit pengunggahan, pencarian, dan penghapusan berkas.
+                </p>
               </div>
-              <button className="btn btn-secondary" onClick={() => fetchLogs(logSearch, logPage, logLimit)} disabled={loadingLogs}>
-                {loadingLogs ? 'Memuat...' : '🔄 Segarkan'}
-              </button>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button className="btn-refresh" onClick={() => fetchLogs(logSearch, logPage, logLimit)} disabled={loadingLogs} style={{ height: '40px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                  {loadingLogs ? '⏳ Memuat...' : '🔄 Refresh'}
+                </button>
+                {user?.role === 'admin' && (
+                  <button 
+                    className="btn-delete-user" 
+                    onClick={handleClearLogs}
+                    style={{ height: '40px', display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '0.6rem 1.25rem', fontSize: '0.88rem' }}
+                  >
+                    🗑️ Reset Log
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Search + Per-page controls */}
@@ -1889,11 +2914,12 @@ function App() {
               </div>
             ) : (
               <>
-                <div className="table-responsive">
+                <DragScrollContainer className="table-responsive">
                   <table className="excel-table logs-table">
                     <thead>
                       <tr>
                         <th>Waktu Kejadian</th>
+                        <th>Akun</th>
                         <th>Tipe</th>
                         <th>Detail Aktivitas</th>
                         <th>IP Address</th>
@@ -1904,10 +2930,24 @@ function App() {
                     <tbody>
                       {logs.map(log => {
                         let tagClass = 'tag-secondary';
-                        if (log.activity_type === 'upload') tagClass = 'tag-success';
-                        if (log.activity_type === 'delete') tagClass = 'tag-danger';
-                        if (log.activity_type === 'search') tagClass = 'tag-info';
-                        if (log.activity_type === 'access') tagClass = 'tag-access';
+                        let typeLabel = log.activity_type;
+                        if (log.activity_type === 'upload')            { tagClass = 'tag-success';   typeLabel = '📤 Unggah'; }
+                        if (log.activity_type === 'delete')            { tagClass = 'tag-danger';    typeLabel = '🗑️ Hapus'; }
+                        if (log.activity_type === 'search')            { tagClass = 'tag-info';      typeLabel = '🔍 Cari'; }
+                        if (log.activity_type === 'access')            { tagClass = 'tag-access';    typeLabel = '🔑 Akses'; }
+                        if (log.activity_type === 'reset_stats')       { tagClass = 'tag-danger';    typeLabel = '♻️ Reset'; }
+                        if (log.activity_type === 'clear_logs')        { tagClass = 'tag-danger';    typeLabel = '🗑️ Reset Log'; }
+                        if (log.activity_type === 'login')             { tagClass = 'tag-login';     typeLabel = '🔓 Login'; }
+                        if (log.activity_type === 'logout')            { tagClass = 'tag-logout';    typeLabel = '🚪 Logout'; }
+                        if (log.activity_type === 'login_failed')      { tagClass = 'tag-warning';   typeLabel = '⚠️ Gagal Login'; }
+                        if (log.activity_type === 'create_user')       { tagClass = 'tag-success';   typeLabel = '👤 Buat User'; }
+                        if (log.activity_type === 'delete_user')       { tagClass = 'tag-danger';    typeLabel = '🗑️ Hapus User'; }
+                        if (log.activity_type === 'add_bookmark')      { tagClass = 'tag-success';   typeLabel = '⭐ +Bookmark'; }
+                        if (log.activity_type === 'delete_bookmark')   { tagClass = 'tag-danger';    typeLabel = '⭐ -Bookmark'; }
+                        if (log.activity_type === 'edit_bookmark')     { tagClass = 'tag-info';      typeLabel = '✏️ Catatan Book'; }
+                        if (log.activity_type === 'view_file')         { tagClass = 'tag-info';      typeLabel = '📂 Lihat Berkas'; }
+                        if (log.activity_type === 'edit_document')     { tagClass = 'tag-warning';   typeLabel = '✏️ Edit Baris'; }
+                        if (log.activity_type === 'send_notification') { tagClass = 'tag-access';    typeLabel = '📢 Kirim Notif'; }
 
                         // Device type icon
                         const deviceType = (log.device_type || '').toLowerCase();
@@ -1935,12 +2975,24 @@ function App() {
 
                         return (
                           <tr key={log.id}>
-                            <td className="meta-cell text-center" style={{ width: '160px', fontSize: '12px' }}>
+                            <td className="meta-cell text-center" style={{ width: '155px', fontSize: '12px' }}>
                               {new Date(log.created_at).toLocaleString('id-ID')}
                             </td>
-                            <td className="text-center" style={{ width: '100px' }}>
+                            <td className="text-center" style={{ width: '120px' }}>
+                              {log.username ? (
+                                <span style={{
+                                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                  background: 'rgba(139,92,246,0.15)', border: '1px solid rgba(139,92,246,0.35)',
+                                  color: '#c4b5fd', borderRadius: '6px', padding: '2px 8px',
+                                  fontSize: '11px', fontWeight: '600', whiteSpace: 'nowrap'
+                                }}>
+                                  👤 {log.username}
+                                </span>
+                              ) : <span className="no-data">—</span>}
+                            </td>
+                            <td className="text-center" style={{ width: '110px' }}>
                               <span className={`activity-tag ${tagClass}`}>
-                                {log.activity_type.toUpperCase()}
+                                {typeLabel}
                               </span>
                             </td>
                             <td className="description-cell" style={{ fontSize: '13px' }}>
@@ -1984,7 +3036,7 @@ function App() {
                       })}
                     </tbody>
                   </table>
-                </div>
+                </DragScrollContainer>
 
                 {/* Pagination controls */}
                 {logTotalPages > 1 && (
@@ -2043,12 +3095,32 @@ function App() {
       {/* TAB 5: DASHBOARD */}
       {activeTab === 'dashboard' && (
         <main className="main-content">
-          <div className="dashboard-header">
-            <h2>📊 Dashboard Statistik</h2>
-            <p>Ringkasan aktivitas dan kondisi data aplikasi secara real-time.</p>
-            <button className="btn-refresh" onClick={fetchDashboard} disabled={loadingDashboard}>
-              {loadingDashboard ? '⏳ Memuat...' : '🔄 Refresh'}
-            </button>
+          <div className="dashboard-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', borderBottom: '1px solid var(--glass-border)', paddingBottom: '1.25rem', marginBottom: '1.75rem' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <h2 style={{ margin: 0, fontSize: '1.6rem', fontWeight: '700', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span>📊</span>
+                <span style={{ background: 'linear-gradient(135deg, #fff 0%, #a78bfa 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
+                  Dashboard Statistik
+                </span>
+              </h2>
+              <p style={{ margin: 0, fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.4', maxWidth: '550px' }}>
+                Ringkasan aktivitas dan kondisi data aplikasi secara real-time.
+              </p>
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button className="btn-refresh" onClick={fetchDashboard} disabled={loadingDashboard} style={{ height: '40px', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                {loadingDashboard ? '⏳ Memuat...' : '🔄 Refresh'}
+              </button>
+              {user?.role === 'admin' && (
+                <button 
+                  className="btn-delete-user" 
+                  onClick={handleResetStats}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '0.6rem 1.25rem', fontSize: '0.88rem' }}
+                >
+                  🗑️ Reset Statistik
+                </button>
+              )}
+            </div>
           </div>
 
           {loadingDashboard ? (
@@ -2079,6 +3151,170 @@ function App() {
                     <div className="stat-card-label">{card.label}</div>
                   </div>
                 ))}
+              </div>
+
+              {/* ANALITIK VISUAL (CHARTS & GRAPHS) */}
+              <div className="dashboard-panel dashboard-panel--wide" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '2rem', padding: '1.75rem', marginBottom: '1.5rem' }}>
+                
+                {/* Chart 1: Tren Aktivitas 7 Hari Terakhir (SVG Line / Area Chart) */}
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <h3 style={{ margin: '0 0 1.25rem 0', fontSize: '1rem', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    📈 Tren Aktivitas Mingguan (Total Log harian)
+                  </h3>
+                  {(() => {
+                    // Process dailyActivity to get total counts per day
+                    const dayMap = {};
+                    dashboardStats.dailyActivity?.forEach(item => {
+                      const dayStr = new Date(item.day).toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric' });
+                      dayMap[dayStr] = (dayMap[dayStr] || 0) + parseInt(item.count || 0);
+                    });
+
+                    const days = Object.keys(dayMap);
+                    const values = Object.values(dayMap);
+                    
+                    if (days.length === 0) {
+                      return <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic', margin: '2rem 0' }}>Belum ada aktivitas dalam 7 hari terakhir.</p>;
+                    }
+
+                    // Normalize to fit inside SVG viewbox (width: 400, height: 200)
+                    const maxValue = Math.max(...values, 5); // default min height 5
+                    const points = days.map((day, index) => {
+                      const x = 40 + (index * 320) / (days.length - 1 || 1);
+                      const y = 160 - (values[index] * 120) / maxValue;
+                      return { x, y, day, value: values[index] };
+                    });
+
+                    const linePath = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
+                    const areaPath = points.length > 0 
+                      ? `${linePath} L ${points[points.length - 1].x} 160 L ${points[0].x} 160 Z`
+                      : '';
+
+                    return (
+                      <div style={{ position: 'relative', width: '100%', height: '220px' }}>
+                        <svg viewBox="0 0 400 200" style={{ width: '100%', height: '100%', overflow: 'visible' }}>
+                          <defs>
+                            <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="var(--accent-secondary)" stopOpacity="0.45"/>
+                              <stop offset="100%" stopColor="var(--accent-secondary)" stopOpacity="0.0"/>
+                            </linearGradient>
+                          </defs>
+
+                          {/* Grid Lines */}
+                          {[0, 0.25, 0.5, 0.75, 1].map((r, idx) => {
+                            const y = 40 + r * 120;
+                            const val = Math.round(maxValue * (1 - r));
+                            return (
+                              <g key={idx}>
+                                <line x1="40" y1={y} x2="360" y2={y} stroke="rgba(255,255,255,0.06)" strokeDasharray="4 4" />
+                                <text x="12" y={y + 4} fill="var(--text-muted)" fontSize="8" textAnchor="start">{val}</text>
+                              </g>
+                            );
+                          })}
+
+                          {/* Area under the line */}
+                          {areaPath && <path d={areaPath} fill="url(#areaGradient)" />}
+
+                          {/* Line path */}
+                          {linePath && <path d={linePath} fill="none" stroke="var(--accent-secondary)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />}
+
+                          {/* Grid bottom axis */}
+                          <line x1="40" y1="160" x2="360" y2="160" stroke="rgba(255,255,255,0.15)" strokeWidth="1" />
+
+                          {/* Points and Labels */}
+                          {points.map((p, idx) => (
+                            <g key={idx}>
+                              <circle cx={p.x} cy={p.y} r="4" fill="#fff" stroke="var(--accent-secondary)" strokeWidth="2.5" />
+                              <text x={p.x} y={p.y - 10} fill="#fff" fontSize="8" fontWeight="600" textAnchor="middle">
+                                {p.value}
+                              </text>
+                              <text x={p.x} y="178" fill="var(--text-secondary)" fontSize="8" textAnchor="middle">{p.day}</text>
+                            </g>
+                          ))}
+                        </svg>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Chart 2: Distribusi Kategori Bookmark (Donut Chart) */}
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <h3 style={{ margin: '0 0 1.25rem 0', fontSize: '1rem', color: '#fff', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    🍩 Distribusi Kategori Bookmark
+                  </h3>
+                  {(() => {
+                    const groups = dashboardStats.bookmarkGroups || [];
+                    const totalCount = groups.reduce((acc, g) => acc + parseInt(g.count || 0), 0);
+                    
+                    if (totalCount === 0) {
+                      return <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic', margin: '2rem 0' }}>Belum ada bookmark tersimpan.</p>;
+                    }
+
+                    const colors = ['#8b5cf6', '#10b981', '#f59e0b', '#3b82f6', '#ec4899', '#34d399'];
+                    
+                    let accumulatedPercent = 0;
+                    const segments = groups.map((g, i) => {
+                      const count = parseInt(g.count || 0);
+                      const percent = (count / totalCount) * 100;
+                      const segmentColor = colors[i % colors.length];
+                      const startPercent = accumulatedPercent;
+                      accumulatedPercent += percent;
+                      return {
+                        name: g.group_name || 'Umum',
+                        count,
+                        percent,
+                        color: segmentColor,
+                        startPercent
+                      };
+                    });
+
+                    const radius = 60;
+                    const circumference = 2 * Math.PI * radius;
+
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-around', flexWrap: 'wrap', gap: '20px', height: '220px' }}>
+                        <div style={{ position: 'relative', width: '150px', height: '150px' }}>
+                          <svg viewBox="0 0 160 160" style={{ width: '100%', height: '100%', transform: 'rotate(-90deg)' }}>
+                            <circle cx="80" cy="80" r={radius} fill="transparent" stroke="rgba(255,255,255,0.03)" strokeWidth="18" />
+                            {segments.map((seg, idx) => {
+                              const strokeDash = (seg.percent / 100) * circumference;
+                              const strokeOffset = circumference - (seg.startPercent / 100) * circumference;
+                              return (
+                                <circle
+                                  key={idx}
+                                  cx="80"
+                                  cy="80"
+                                  r={radius}
+                                  fill="transparent"
+                                  stroke={seg.color}
+                                  strokeWidth="18"
+                                  strokeDasharray={`${strokeDash} ${circumference - strokeDash}`}
+                                  strokeDashoffset={strokeOffset}
+                                  strokeLinecap="round"
+                                  style={{ transition: 'stroke-dashoffset 0.5s ease-out' }}
+                                />
+                              );
+                            })}
+                          </svg>
+                          <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
+                            <span style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#fff' }}>{totalCount}</span>
+                            <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>Bookmark</span>
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '150px', overflowY: 'auto', paddingRight: '10px' }}>
+                          {segments.map((seg, idx) => (
+                            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem' }}>
+                              <span style={{ display: 'inline-block', width: '10px', height: '10px', borderRadius: '50%', background: seg.color }}></span>
+                              <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{seg.name}:</span>
+                              <span style={{ color: '#fff', fontWeight: 600 }}>{seg.count} ({Math.round(seg.percent)}%)</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+
               </div>
 
               {/* Top Searches */}
@@ -2190,10 +3426,511 @@ function App() {
           )}
         </main>
       )}
+
+      {/* TAB 6: KELOLA PENGGUNA (ADMIN ONLY) */}
+      {activeTab === 'users' && user.role === 'admin' && (
+        <main className="main-content">
+          <div className="section-header-row">
+            <div>
+              <h2>👥 Kelola Pengguna (User Management)</h2>
+              <p>Daftarkan dan kelola hak akses akun pengguna aplikasi pencarian dokumen.</p>
+            </div>
+          </div>
+
+          <div className="users-management-container">
+            <div className="users-grid-layout">
+              {/* Left Column Wrapper */}
+              <div className="users-left-column">
+                {/* Form Tambah User */}
+                <div className="users-form-panel">
+                  <h3>{editingUser ? `✏️ Edit Akun: ${editingUser.username}` : '➕ Daftarkan Akun Baru'}</h3>
+                  <form onSubmit={editingUser ? handleUpdateUser : handleCreateUser} className="users-create-form">
+                    <div className="form-group">
+                      <label>Username</label>
+                      <input
+                        type="text"
+                        value={newUsername}
+                        onChange={(e) => setNewUsername(e.target.value)}
+                        placeholder="Contoh: operator_budi"
+                        required
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Nama Lengkap <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(opsional)</span></label>
+                      <input
+                        type="text"
+                        value={newFullName}
+                        onChange={(e) => setNewFullName(e.target.value)}
+                        placeholder="Contoh: Budi Santoso"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Password {editingUser && <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(kosongkan jika tidak diubah)</span>}</label>
+                      <input
+                        type="password"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                        placeholder={editingUser ? "Biarkan kosong jika tidak diubah" : "Masukkan password akun baru"}
+                        required={!editingUser}
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Role / Hak Akses</label>
+                      <select
+                        value={newUserRole}
+                        onChange={(e) => setNewUserRole(e.target.value)}
+                      >
+                        <option value="viewer">Viewer (Hanya Cari)</option>
+                        <option value="operator">Operator (Unggah + Cari)</option>
+                        <option value="admin">Admin (Akses Penuh)</option>
+                      </select>
+                    </div>
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                      <button type="submit" className="btn-submit-user" style={{ flex: 1 }}>
+                        {editingUser ? 'Simpan Perubahan 💾' : 'Daftarkan Akun 👥'}
+                      </button>
+                      {editingUser && (
+                        <button type="button" onClick={cancelEditUser} className="btn-submit-user" style={{ background: '#475569', color: '#fff', flex: 0.4 }}>
+                          Batal
+                        </button>
+                      )}
+                    </div>
+                  </form>
+                </div>
+
+                {/* Broadcast Global Notification Form */}
+                <div className="users-form-panel" style={{ marginTop: '1.5rem' }}>
+                  <h3>📢 Kirim Notifikasi</h3>
+                  <form onSubmit={handleBroadcastNotification} className="users-create-form">
+                    <div className="form-group" style={{ marginBottom: '1rem' }}>
+                      <label>Penerima Notifikasi</label>
+                      <select
+                        value={broadcastRecipient}
+                        onChange={(e) => setBroadcastRecipient(e.target.value)}
+                        style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: '#fff', fontSize: '0.88rem' }}
+                      >
+                        <option value="all">📢 Semua Akun (Global Broadcast)</option>
+                        {usersList.map(u => (
+                          <option key={u.id} value={u.id}>
+                            👤 {u.full_name ? `${u.full_name} (${u.username})` : u.username} — {u.role.toUpperCase()}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    
+                    <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                      <label>Pesan Notifikasi</label>
+                      <textarea
+                        value={broadcastMessage}
+                        onChange={(e) => setBroadcastMessage(e.target.value)}
+                        placeholder={broadcastRecipient === 'all' ? "Masukkan pengumuman penting untuk semua pengguna..." : "Masukkan pesan khusus untuk pengguna ini..."}
+                        required
+                        style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', minHeight: '80px', fontFamily: 'inherit', resize: 'vertical' }}
+                      />
+                    </div>
+                    <button type="submit" className="btn-submit-user" style={{ background: 'linear-gradient(135deg, var(--accent-secondary), #7c3aed)' }}>
+                      {broadcastRecipient === 'all' ? 'Kirim ke Semua Akun 🚀' : 'Kirim ke Akun Dituju 🚀'}
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              {/* Tabel Daftar User */}
+              <div className="users-list-panel">
+                <h3>📋 Daftar Pengguna Terdaftar</h3>
+                {loadingUsers ? (
+                  <div className="search-loader"><div className="spinner"></div><p>Memuat daftar pengguna...</p></div>
+                ) : usersList.length === 0 ? (
+                  <p>Tidak ada pengguna terdaftar.</p>
+                ) : (
+                  <div className="users-table-wrapper">
+                    <table className="users-table">
+                      <thead>
+                        <tr>
+                          <th>Username</th>
+                          <th>Nama Lengkap</th>
+                          <th>Role</th>
+                          <th>Tanggal Dibuat</th>
+                          <th>Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {usersList.map((u) => (
+                          <tr key={u.id}>
+                            <td className="user-td-username">
+                              <strong>{u.username}</strong>
+                              {u.username === user.username && <span className="current-user-badge">Anda</span>}
+                            </td>
+                            <td style={{ color: u.full_name ? 'var(--text-primary)' : 'var(--text-muted)', fontStyle: u.full_name ? 'normal' : 'italic' }}>
+                              {u.full_name || '—'}
+                            </td>
+                            <td>
+                              <span className={`role-badge role-${u.role}`}>
+                                {u.role.toUpperCase()}
+                              </span>
+                            </td>
+                            <td>
+                              {new Date(u.created_at).toLocaleDateString('id-ID')}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-view-bookmarks"
+                                onClick={() => fetchUserBookmarks(u)}
+                                title={`Lihat & Kelola Bookmark milik ${u.username}`}
+                                style={{ marginRight: '8px' }}
+                              >
+                                ⭐ Bookmark
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-view-bookmarks"
+                                onClick={() => startEditUser(u)}
+                                title={`Edit akun "${u.username}"`}
+                                style={{ marginRight: '8px', background: 'rgba(59, 130, 246, 0.15)', border: '1px solid rgba(59, 130, 246, 0.3)', color: '#60a5fa' }}
+                              >
+                                ✏️ Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-delete-user"
+                                onClick={() => handleDeleteUser(u.id, u.username)}
+                                disabled={u.username === user.username}
+                                title={u.username === user.username ? "Anda tidak dapat menghapus akun sendiri" : "Hapus Akun"}
+                              >
+                                🗑️ Hapus
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Kelola Bookmark Per User Panel */}
+            {selectedUserForBookmarks && (
+              <div className="users-bookmarks-panel" style={{ marginTop: '2rem' }}>
+                <div className="bookmarks-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', borderBottom: '1px solid var(--glass-border)', paddingBottom: '0.5rem' }}>
+                  <h3>⭐ Kelola Bookmark Akun: <span style={{ color: 'var(--accent-secondary)' }}>{selectedUserForBookmarks.username}</span> ({userBookmarksList.length})</h3>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    {userBookmarksList.length > 0 && (
+                      <button 
+                        onClick={handleClearUserBookmarks}
+                        className="btn-delete-user"
+                        style={{ padding: '0.45rem 0.9rem', background: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#f87171', borderRadius: '6px', fontSize: '0.82rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                      >
+                        🗑️ Hapus Semua Bookmark
+                      </button>
+                    )}
+                    <button 
+                      className="btn-close-bookmarks"
+                      onClick={() => { setSelectedUserForBookmarks(null); setEditingBookmark(null); }}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      ❌ Tutup
+                    </button>
+                  </div>
+                </div>
+
+                {editingBookmark && (
+                  <div className="bookmark-edit-form-wrapper" style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '10px', padding: '1.25rem', marginBottom: '1.5rem' }}>
+                    <h4 style={{ marginBottom: '1rem' }}>✏️ Edit Bookmark Baris #{editingBookmark.row_number} - {editingBookmark.filename}</h4>
+                    <form onSubmit={handleUpdateBookmark}>
+                      <div className="form-group" style={{ marginBottom: '1rem' }}>
+                        <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Nama Kategori / Grup Bookmark</label>
+                        <input
+                          type="text"
+                          value={editingBookmarkGroup}
+                          onChange={(e) => setEditingBookmarkGroup(e.target.value)}
+                          placeholder="Contoh: Keuangan, Penting, Umum, dll."
+                          style={{ width: '100%', padding: '0.6rem 0.85rem', background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem', marginBottom: '1rem' }}
+                        />
+                      </div>
+                      <div className="form-group" style={{ marginBottom: '1rem' }}>
+                        <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Catatan / Keterangan Bookmark</label>
+                        <textarea
+                          value={editingBookmarkNotes}
+                          onChange={(e) => setEditingBookmarkNotes(e.target.value)}
+                          placeholder="Tambahkan catatan khusus untuk bookmark ini..."
+                          style={{ width: '100%', padding: '0.6rem', background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '6px', color: '#fff', fontSize: '0.85rem', minHeight: '60px', fontFamily: 'inherit', resize: 'vertical' }}
+                        />
+                      </div>
+                      
+                      <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                        <label style={{ display: 'block', fontWeight: 'bold', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>Konten Baris Dokumen (Key-Values)</label>
+                        <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid var(--glass-border)', borderRadius: '6px', padding: '0.75rem', background: 'var(--bg-secondary)' }}>
+                          {Object.entries(editingBookmarkRowData).map(([key, val]) => (
+                            <div key={key} style={{ display: 'flex', alignItems: 'center', marginBottom: '0.5rem', gap: '8px' }}>
+                              <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', width: '150px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={key}>{key}:</span>
+                              <input
+                                type="text"
+                                value={String(val)}
+                                onChange={(e) => {
+                                  const updatedVal = e.target.value;
+                                  setEditingBookmarkRowData(prev => ({ ...prev, [key]: updatedVal }));
+                                }}
+                                style={{ flex: 1, padding: '0.35rem 0.6rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '4px', color: '#fff', fontSize: '0.82rem' }}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '10px' }}>
+                        <button type="submit" className="btn-submit-user" style={{ padding: '0.5rem 1rem' }}>
+                          Simpan Perubahan
+                        </button>
+                        <button 
+                          type="button" 
+                          className="btn-delete-user" 
+                          onClick={() => setEditingBookmark(null)}
+                          style={{ padding: '0.5rem 1rem', background: 'rgba(255, 255, 255, 0.05)', borderColor: 'var(--glass-border)', color: 'var(--text-secondary)' }}
+                        >
+                          Batal
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
+
+                {loadingUserBookmarks ? (
+                  <div className="search-loader"><div className="spinner"></div><p>Memuat bookmark pengguna...</p></div>
+                ) : userBookmarksList.length === 0 ? (
+                  <div className="empty-state" style={{ padding: '2rem' }}>
+                    <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Pengguna ini belum mem-bookmark dokumen apa pun.</p>
+                  </div>
+                ) : (
+                  <div className="users-table-wrapper">
+                    <table className="users-table">
+                      <thead>
+                        <tr>
+                          <th>Berkas / File</th>
+                          <th>Sheet</th>
+                          <th>No. Baris</th>
+                          <th>Data / Konten</th>
+                          <th>Catatan</th>
+                          <th>Aksi</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {userBookmarksList.map((b) => (
+                          <tr key={b.id}>
+                            <td>📄 {b.filename}</td>
+                            <td>📁 {b.sheet_name}</td>
+                            <td>#{b.row_number}</td>
+                            <td>
+                              <div className="row-data-preview-container" style={{ maxHeight: '100px', overflowY: 'auto', fontSize: '0.8rem' }}>
+                                {Object.entries(b.row_data || {}).map(([k, v]) => (
+                                  <div key={k} style={{ marginBottom: '2px' }}>
+                                    <strong style={{ color: 'var(--text-muted)' }}>{k}:</strong> {String(v)}
+                                  </div>
+                                ))}
+                              </div>
+                            </td>
+                            <td>
+                              {b.notes ? (
+                                <span style={{ fontSize: '0.85rem' }}>{b.notes}</span>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: '0.8rem' }}>(Kosong)</span>
+                              )}
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-edit-bookmark"
+                                onClick={() => {
+                                  setEditingBookmark(b);
+                                  setEditingBookmarkNotes(b.notes || '');
+                                  setEditingBookmarkGroup(b.group_name || 'Umum');
+                                  setEditingBookmarkRowData({ ...b.row_data });
+                                }}
+                                title="Edit catatan & data baris bookmark"
+                                style={{ marginRight: '8px' }}
+                              >
+                                ✏️ Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-delete-user"
+                                onClick={() => handleDeleteUserBookmark(b.id)}
+                                title="Hapus bookmark dari pengguna ini"
+                              >
+                                🗑️ Hapus
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </main>
+      )}
       
       <footer className="app-footer-bar">
         <p>© 2026 SpreadSheet Finder — Didukung oleh React, Express, dan PostgreSQL</p>
       </footer>
+
+      {/* Modal Dialog Pemilihan Kategori / Grup Bookmark */}
+      {showBookmarkGroupModal && (
+        <div className="modal-overlay" style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0, 0, 0, 0.65)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 9999,
+          padding: '20px'
+        }}>
+          <div className="modal-box" style={{
+            background: 'var(--bg-secondary)',
+            border: '1px solid var(--glass-border)',
+            borderRadius: '16px',
+            padding: '2rem',
+            width: '100%',
+            maxWidth: '480px',
+            boxShadow: '0 20px 40px rgba(0, 0, 0, 0.4)',
+            color: '#fff',
+            animation: 'fadeIn 0.3s ease-out'
+          }}>
+            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.25rem', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--accent-secondary)' }}>
+              ⭐ Simpan ke Kategori Bookmark
+            </h3>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1.5rem', lineHeight: '1.4' }}>
+              Pilih kategori yang sudah ada atau buat kategori baru agar bookmark data Anda terpisah dan terorganisir dengan rapi.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '2rem' }}>
+              {/* Option 1: Pilih kategori yang sudah ada */}
+              {(() => {
+                const existingGroups = new Set();
+                bookmarksList.forEach(b => {
+                  if (b.group_name) existingGroups.add(b.group_name);
+                });
+                const groupsList = Array.from(existingGroups).filter(g => g !== 'Semua');
+
+                return (
+                  <>
+                    {groupsList.length > 0 && (
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: bookmarkGroupModalSelectedOption === 'existing' ? '1px solid var(--accent-secondary)' : '1px solid rgba(255,255,255,0.05)', transition: 'all 0.2s ease' }}>
+                        <input
+                          type="radio"
+                          name="bookmark-option"
+                          checked={bookmarkGroupModalSelectedOption === 'existing'}
+                          onChange={() => setBookmarkGroupModalSelectedOption('existing')}
+                          style={{ marginTop: '3px', cursor: 'pointer' }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <span style={{ fontSize: '0.88rem', fontWeight: 600, display: 'block', marginBottom: '6px' }}>Pilih Kategori Terdaftar:</span>
+                          <select
+                            value={bookmarkGroupModalSelectedExisting}
+                            onChange={(e) => {
+                              setBookmarkGroupModalSelectedExisting(e.target.value);
+                              setBookmarkGroupModalSelectedOption('existing');
+                            }}
+                            disabled={bookmarkGroupModalSelectedOption !== 'existing'}
+                            style={{
+                              width: '100%',
+                              padding: '0.5rem',
+                              borderRadius: '6px',
+                              background: 'var(--bg-tertiary)',
+                              border: '1px solid var(--glass-border)',
+                              color: '#fff',
+                              fontSize: '0.85rem',
+                              cursor: bookmarkGroupModalSelectedOption === 'existing' ? 'pointer' : 'default'
+                            }}
+                          >
+                            {groupsList.map(g => (
+                              <option key={g} value={g}>{g}</option>
+                            ))}
+                          </select>
+                        </div>
+                      </label>
+                    )}
+
+                    {/* Option 2: Buat kategori baru */}
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.75rem', borderRadius: '8px', border: bookmarkGroupModalSelectedOption === 'new' ? '1px solid var(--accent-secondary)' : '1px solid rgba(255,255,255,0.05)', transition: 'all 0.2s ease' }}>
+                      <input
+                        type="radio"
+                        name="bookmark-option"
+                        checked={bookmarkGroupModalSelectedOption === 'new'}
+                        onChange={() => setBookmarkGroupModalSelectedOption('new')}
+                        style={{ marginTop: '3px', cursor: 'pointer' }}
+                      />
+                      <div style={{ flex: 1 }}>
+                        <span style={{ fontSize: '0.88rem', fontWeight: 600, display: 'block', marginBottom: '6px' }}>Buat Kategori Baru:</span>
+                        <input
+                          type="text"
+                          placeholder="Masukkan nama kategori baru (contoh: Logistik)"
+                          value={bookmarkGroupModalNewInput}
+                          onChange={(e) => {
+                            setBookmarkGroupModalNewInput(e.target.value);
+                            setBookmarkGroupModalSelectedOption('new');
+                          }}
+                          disabled={bookmarkGroupModalSelectedOption !== 'new'}
+                          style={{
+                            width: '100%',
+                            padding: '0.55rem 0.75rem',
+                            borderRadius: '6px',
+                            background: 'var(--bg-tertiary)',
+                            border: '1px solid var(--glass-border)',
+                            color: '#fff',
+                            fontSize: '0.85rem'
+                          }}
+                        />
+                      </div>
+                    </label>
+                  </>
+                );
+              })()}
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn-delete-user"
+                onClick={() => setShowBookmarkGroupModal(false)}
+                style={{
+                  padding: '0.55rem 1.25rem',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  border: '1px solid var(--glass-border)',
+                  color: 'var(--text-secondary)',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '0.88rem'
+                }}
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                className="btn-submit-user"
+                onClick={handleConfirmBookmarkToggle}
+                style={{
+                  padding: '0.55rem 1.5rem',
+                  borderRadius: '8px',
+                  cursor: 'pointer',
+                  fontSize: '0.88rem',
+                  fontWeight: 600
+                }}
+              >
+                Simpan Bookmark 💾
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Toast Notification Container */}
       <div className="toast-container">
@@ -2213,6 +3950,231 @@ function App() {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen({ setToken, setUser, isDarkMode, setIsDarkMode, showToast }) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loginError, setLoginError] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    if (!username.trim() || !password) {
+      setLoginError('Username dan Password wajib diisi.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.trim(), password })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Login gagal.');
+      }
+      localStorage.setItem('app_token', data.token);
+      localStorage.setItem('app_user', JSON.stringify(data.user));
+      setToken(data.token);
+      setUser(data.user);
+      showToast('🔑 Login Berhasil', `Selamat datang kembali, ${data.user.username}!`, 'success');
+    } catch (err) {
+      setLoginError(err.message || 'Username atau password salah.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className={`login-container ${isDarkMode ? 'dark-theme' : 'light-theme'}`}>
+      <div className="login-card-container">
+        <div className="login-glass-card">
+          <div className="login-logo-section">
+            <div className="login-logo-icon">📊</div>
+            <h2>SpreadSheet Finder</h2>
+            <p>Silakan masuk untuk mengakses database dokumen</p>
+          </div>
+          
+          <form className="login-form" onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label>Username</label>
+              <div className="input-with-icon">
+                <span className="input-icon">👤</span>
+                <input 
+                  type="text" 
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); setLoginError(''); }}
+                  placeholder="Masukkan username Anda"
+                  required
+                  style={loginError ? { borderColor: '#f87171' } : {}}
+                />
+              </div>
+            </div>
+            
+            <div className="form-group">
+              <label>Password</label>
+              <div className="input-with-icon">
+                <span className="input-icon">🔒</span>
+                <input 
+                  type="password" 
+                  value={password}
+                  onChange={(e) => { setPassword(e.target.value); setLoginError(''); }}
+                  placeholder="Masukkan password Anda"
+                  required
+                  style={loginError ? { borderColor: '#f87171' } : {}}
+                />
+              </div>
+            </div>
+            
+            {loginError && (
+              <div className="login-error-banner">
+                <span className="login-error-icon">⚠️</span>
+                <span>{loginError}</span>
+              </div>
+            )}
+
+            <button type="submit" className="login-submit-btn" disabled={loading}>
+              {loading ? 'Memverifikasi...' : 'Masuk ke Aplikasi 🚀'}
+            </button>
+          </form>
+
+          {/* Login Footer Removed */}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Reusable grab-to-scroll component to allow smooth click-and-drag scrolling on wide tables
+function DragScrollContainer({ children, className }) {
+  const containerRef = useRef(null);
+  const [isDown, setIsDown] = useState(false);
+  const [startX, setStartX] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  
+  // States for scroll arrows visibility
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const checkScroll = () => {
+    const el = containerRef.current;
+    if (el) {
+      setCanScrollLeft(el.scrollLeft > 5);
+      setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 5);
+    }
+  };
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (el) {
+      checkScroll();
+      
+      const resizeObserver = new ResizeObserver(() => {
+        checkScroll();
+      });
+      resizeObserver.observe(el);
+      
+      const mutationObserver = new MutationObserver(checkScroll);
+      mutationObserver.observe(el, { childList: true, subtree: true });
+
+      el.addEventListener('scroll', checkScroll);
+      window.addEventListener('resize', checkScroll);
+      
+      const interval = setInterval(checkScroll, 300);
+
+      return () => {
+        resizeObserver.disconnect();
+        mutationObserver.disconnect();
+        el.removeEventListener('scroll', checkScroll);
+        window.removeEventListener('resize', checkScroll);
+        clearInterval(interval);
+      };
+    }
+  }, [children]);
+
+  const onMouseDown = (e) => {
+    if (e.button !== 0) return;
+    const targetTag = e.target.tagName.toLowerCase();
+    if (targetTag === 'button' || targetTag === 'input' || targetTag === 'select' || targetTag === 'a' || e.target.closest('.bookmark-star-btn') || e.target.closest('.btn-edit-bookmark')) {
+      return;
+    }
+    
+    setIsDown(true);
+    setStartX(e.pageX - containerRef.current.offsetLeft);
+    setScrollLeft(containerRef.current.scrollLeft);
+  };
+
+  const onMouseLeave = () => {
+    setIsDown(false);
+  };
+
+  const onMouseUp = () => {
+    setIsDown(false);
+  };
+
+  const onMouseMove = (e) => {
+    if (!isDown) return;
+    e.preventDefault();
+    const x = e.pageX - containerRef.current.offsetLeft;
+    const walk = (x - startX) * 1.5;
+    containerRef.current.scrollLeft = scrollLeft - walk;
+  };
+
+  const scrollByAmount = (amount) => {
+    const el = containerRef.current;
+    if (el) {
+      el.scrollTo({
+        left: el.scrollLeft + amount,
+        behavior: 'smooth'
+      });
+    }
+  };
+
+  return (
+    <div className="drag-scroll-wrapper" style={{ position: 'relative', width: '100%' }}>
+      {/* Left Scroll Button */}
+      {canScrollLeft && (
+        <button
+          type="button"
+          className="table-scroll-btn scroll-left"
+          onClick={() => scrollByAmount(-300)}
+          title="Geser Kiri"
+        >
+          ◀
+        </button>
+      )}
+
+      {/* Right Scroll Button */}
+      {canScrollRight && (
+        <button
+          type="button"
+          className="table-scroll-btn scroll-right"
+          onClick={() => scrollByAmount(300)}
+          title="Geser Kanan"
+        >
+          ▶
+        </button>
+      )}
+
+      <div
+        ref={containerRef}
+        className={className}
+        onMouseDown={onMouseDown}
+        onMouseLeave={onMouseLeave}
+        onMouseUp={onMouseUp}
+        onMouseMove={onMouseMove}
+        style={{
+          cursor: isDown ? 'grabbing' : 'grab',
+          userSelect: isDown ? 'none' : 'auto'
+        }}
+      >
+        {children}
       </div>
     </div>
   );

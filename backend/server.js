@@ -6,7 +6,11 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 const { UAParser } = require('ua-parser-js');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecretkey12345';
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -95,11 +99,11 @@ const upload = multer({
 
 // PostgreSQL Database Connection Pool
 const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || '127.0.0.1',
+  database: process.env.DB_NAME || 'excel_db',
+  password: process.env.DB_PASSWORD || 'mysecretpassword',
+  port: process.env.DB_PORT || '5432',
 });
 
 // Database Migration on startup
@@ -148,7 +152,7 @@ const initDatabase = async () => {
     `);
 
     // Add device columns to existing table if they don't exist (migration)
-    const deviceCols = ['ip_address VARCHAR(100)', 'browser VARCHAR(150)', 'os VARCHAR(150)', 'device_type VARCHAR(50)', 'device_label VARCHAR(200)', 'engine VARCHAR(100)', 'user_agent TEXT'];
+    const deviceCols = ['ip_address VARCHAR(100)', 'browser VARCHAR(150)', 'os VARCHAR(150)', 'device_type VARCHAR(50)', 'device_label VARCHAR(200)', 'engine VARCHAR(100)', 'user_agent TEXT', 'user_id INTEGER', 'username VARCHAR(50)'];
     for (const col of deviceCols) {
       const colName = col.split(' ')[0];
       await client.query(`ALTER TABLE activity_logs ADD COLUMN IF NOT EXISTS ${colName} ${col.split(' ').slice(1).join(' ')};`);
@@ -180,15 +184,174 @@ const initDatabase = async () => {
       console.warn('Gagal mengaktifkan pg_trgm saat startup:', trgmErr.message);
     }
 
+    // Create users table first
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL,
+        full_name VARCHAR(100),
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Migrate: add full_name column if not exists
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100);
+    `);
+
+    // Check if bookmarks table has user_id column
+    try {
+      const hasUserIdRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='bookmarks' AND column_name='user_id';
+      `);
+      
+      if (hasUserIdRes.rows.length === 0) {
+        console.log('Mengubah tabel bookmarks untuk mendukung user-specific bookmarks...');
+        // Drop existing table if it exists to clean up constraints easily
+        await client.query(`DROP TABLE IF EXISTS bookmarks CASCADE;`);
+      }
+    } catch (checkErr) {
+      console.log('Checking/dropping bookmarks table error or table does not exist:', checkErr.message);
+    }
+
     // Create bookmarks table
     await client.query(`
       CREATE TABLE IF NOT EXISTS bookmarks (
         id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         row_id INTEGER NOT NULL REFERENCES document_rows(id) ON DELETE CASCADE,
+        notes TEXT,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT unique_row_bookmark UNIQUE(row_id)
+        CONSTRAINT unique_user_row_bookmark UNIQUE(user_id, row_id)
       );
     `);
+
+    // Check if bookmarks table has notes column
+    try {
+      const hasNotesRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='bookmarks' AND column_name='notes';
+      `);
+      if (hasNotesRes.rows.length === 0) {
+        console.log('Menambahkan kolom notes ke tabel bookmarks...');
+        await client.query(`ALTER TABLE bookmarks ADD COLUMN notes TEXT;`);
+      }
+    } catch (alterErr) {
+      console.log('Error adding notes column to bookmarks:', alterErr.message);
+    }
+
+    // Check if bookmarks table has group_name column
+    try {
+      const hasGroupRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='bookmarks' AND column_name='group_name';
+      `);
+      if (hasGroupRes.rows.length === 0) {
+        console.log('Menambahkan kolom group_name ke tabel bookmarks...');
+        await client.query(`ALTER TABLE bookmarks ADD COLUMN group_name VARCHAR(100) DEFAULT 'Umum';`);
+      }
+    } catch (alterErr) {
+      console.log('Error adding group_name column to bookmarks:', alterErr.message);
+    }
+
+    // Ensure UNIQUE constraint on user_id and row_id exists
+    try {
+      // Delete any duplicates first just in case
+      await client.query(`
+        DELETE FROM bookmarks a USING bookmarks b 
+        WHERE a.id < b.id AND a.user_id = b.user_id AND a.row_id = b.row_id;
+      `);
+      // Add constraint
+      await client.query(`
+        ALTER TABLE bookmarks 
+        ADD CONSTRAINT unique_user_row_bookmark UNIQUE(user_id, row_id);
+      `);
+      console.log('Constraint unique_user_row_bookmark berhasil ditambahkan.');
+    } catch (conErr) {
+      // Ignore if it already exists
+    }
+
+    // Check if uploaded_files table has uploaded_by column
+    try {
+      const hasUploadedByRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='uploaded_files' AND column_name='uploaded_by';
+      `);
+      if (hasUploadedByRes.rows.length === 0) {
+        console.log('Menambahkan kolom uploaded_by ke tabel uploaded_files...');
+        await client.query(`ALTER TABLE uploaded_files ADD COLUMN uploaded_by INTEGER REFERENCES users(id) ON DELETE SET NULL;`);
+      }
+    } catch (alterErr) {
+      console.log('Error adding uploaded_by column to uploaded_files:', alterErr.message);
+    }
+
+    // Create notifications table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id SERIAL PRIMARY KEY,
+        message TEXT NOT NULL,
+        recipient_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Check if notifications table has recipient_id column
+    try {
+      const hasRecipientRes = await client.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name='notifications' AND column_name='recipient_id';
+      `);
+      if (hasRecipientRes.rows.length === 0) {
+        console.log('Menambahkan kolom recipient_id ke tabel notifications...');
+        await client.query(`ALTER TABLE notifications ADD COLUMN recipient_id INTEGER REFERENCES users(id) ON DELETE CASCADE;`);
+      }
+    } catch (alterErr) {
+      console.log('Error adding recipient_id column to notifications:', alterErr.message);
+    }
+
+    // Create user_notification_reads table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_notification_reads (
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        notification_id INTEGER REFERENCES notifications(id) ON DELETE CASCADE,
+        read_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, notification_id)
+      );
+    `);
+
+    // Check if users table is empty and insert default users if so
+    const userCountRes = await client.query('SELECT COUNT(*)::int FROM users;');
+    if (userCountRes.rows[0].count === 0) {
+      console.log('Menyisipkan pengguna default (admin, operator, viewer)...');
+      
+      const defaultUsers = [
+        { username: 'admin', password: 'admin123', role: 'admin' },
+        { username: 'operator', password: 'operator123', role: 'operator' },
+        { username: 'viewer', password: 'viewer123', role: 'viewer' }
+      ];
+
+      for (const u of defaultUsers) {
+        const passwordHash = await bcrypt.hash(u.password, 10);
+        await client.query(
+          'INSERT INTO users (username, password_hash, role) VALUES ($1, $2, $3);',
+          [u.username, passwordHash, u.role]
+        );
+      }
+      console.log('Pengguna default sukses ditambahkan.');
+    }
+
+    // Set default full names for seeded users if null
+    await client.query(`UPDATE users SET full_name = 'Administrator System' WHERE username = 'admin' AND full_name IS NULL;`);
+    await client.query(`UPDATE users SET full_name = 'Operator Staff' WHERE username = 'operator' AND full_name IS NULL;`);
+    await client.query(`UPDATE users SET full_name = 'Viewer Guest' WHERE username = 'viewer' AND full_name IS NULL;`);
 
     console.log('Inisialisasi database PostgreSQL sukses.');
   } catch (err) {
@@ -201,23 +364,24 @@ const initDatabase = async () => {
 // Call DB Init
 initDatabase();
 
-// Function to log activities to database (with optional device info)
-const logActivity = async (type, details, deviceInfo = null) => {
+// Function to log activities to database (with optional user + device info)
+const logActivity = async (type, details, deviceInfo = null, userInfo = null) => {
   try {
     if (deviceInfo) {
       await pool.query(
         `INSERT INTO activity_logs 
-          (activity_type, activity_details, ip_address, browser, os, device_type, device_label, engine, user_agent)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);`,
+          (activity_type, activity_details, ip_address, browser, os, device_type, device_label, engine, user_agent, user_id, username)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`,
         [type, details,
           deviceInfo.ip, deviceInfo.browser, deviceInfo.os,
-          deviceInfo.device_type, deviceInfo.device_label, deviceInfo.engine, deviceInfo.user_agent
+          deviceInfo.device_type, deviceInfo.device_label, deviceInfo.engine, deviceInfo.user_agent,
+          userInfo ? userInfo.id : null, userInfo ? userInfo.username : null
         ]
       );
     } else {
       await pool.query(
-        `INSERT INTO activity_logs (activity_type, activity_details) VALUES ($1, $2);`,
-        [type, details]
+        `INSERT INTO activity_logs (activity_type, activity_details, user_id, username) VALUES ($1, $2, $3, $4);`,
+        [type, details, userInfo ? userInfo.id : null, userInfo ? userInfo.username : null]
       );
     }
   } catch (err) {
@@ -227,7 +391,7 @@ const logActivity = async (type, details, deviceInfo = null) => {
 
 // --- BACKGROUND EXCEL PROCESSOR ---
 
-async function processFileInBackground(jobId, filePath, originalname) {
+async function processFileInBackground(jobId, filePath, originalname, userInfo = null) {
   console.log(`[Job ${jobId}] Mulai memproses file: "${originalname}"`);
   uploadJobs[jobId] = {
     status: 'processing',
@@ -245,10 +409,10 @@ async function processFileInBackground(jobId, filePath, originalname) {
     client = await pool.connect();
     await client.query('BEGIN');
 
-    // 2. Insert record in uploaded_files
+    // 2. Insert record in uploaded_files with uploaded_by (owner)
     const fileInsertRes = await client.query(
-      `INSERT INTO uploaded_files (filename, sheet_names) VALUES ($1, $2) RETURNING id;`,
-      [originalname, []]
+      `INSERT INTO uploaded_files (filename, sheet_names, uploaded_by) VALUES ($1, $2, $3) RETURNING id;`,
+      [originalname, [], userInfo ? userInfo.id : null]
     );
     fileId = fileInsertRes.rows[0].id;
     console.log(`[Job ${jobId}] ID File di database: ${fileId}`);
@@ -353,8 +517,9 @@ async function processFileInBackground(jobId, filePath, originalname) {
 
     // 6. Log activity
     await client.query(
-      `INSERT INTO activity_logs (activity_type, activity_details) VALUES ($1, $2);`,
-      ['upload', `Berhasil mengunggah berkas "${originalname}" (${totalRowsInserted.toLocaleString('id-ID')} baris data)`]
+      `INSERT INTO activity_logs (activity_type, activity_details, user_id, username) VALUES ($1, $2, $3, $4);`,
+      ['upload', `Berhasil mengunggah berkas "${originalname}" (${totalRowsInserted.toLocaleString('id-ID')} baris data)`,
+        userInfo ? userInfo.id : null, userInfo ? userInfo.username : null]
     );
 
     // 7. Commit transaction
@@ -433,6 +598,229 @@ async function insertBatch(client, fileId, sheetName, batch) {
 
 // --- API ROUTES ---
 
+// Authentication Middleware (JWT Validation)
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Token tidak ditemukan. Silakan login kembali.' });
+  }
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({ error: 'Token tidak valid atau kedaluwarsa. Silakan login kembali.' });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Authorization Middleware (Role Checking)
+const requireRole = (allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: 'Akses ditolak. Anda tidak memiliki izin untuk melakukan aksi ini.' });
+    }
+    next();
+  };
+};
+
+// Auth Endpoint: Login
+app.post('/api/auth/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username dan password wajib diisi.' });
+  }
+
+  try {
+    const userRes = await pool.query('SELECT * FROM users WHERE username = $1;', [username]);
+    if (userRes.rowCount === 0) {
+      // Log failed login attempt
+      logActivity('login_failed', `Login gagal: akun "${username}" tidak ditemukan`, getDeviceInfo(req), { id: null, username });
+      return res.status(401).json({ error: 'Username atau password salah.' });
+    }
+
+    const user = userRes.rows[0];
+    const passwordMatch = await bcrypt.compare(password, user.password_hash);
+    if (!passwordMatch) {
+      // Log failed login attempt (wrong password)
+      logActivity('login_failed', `Login gagal: password salah untuk akun "${username}"`, getDeviceInfo(req), { id: user.id, username });
+      return res.status(401).json({ error: 'Username atau password salah.' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Log successful login
+    logActivity('login', `Login berhasil: akun "${user.username}" (${user.role}) masuk ke aplikasi`, getDeviceInfo(req), { id: user.id, username: user.username });
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        full_name: user.full_name
+      }
+    });
+  } catch (err) {
+    console.error('Error login:', err);
+    res.status(500).json({ error: 'Terjadi kesalahan pada server saat login.' });
+  }
+});
+
+// Auth Endpoint: Logout (records audit log)
+app.post('/api/auth/logout', authenticateToken, async (req, res) => {
+  try {
+    logActivity('logout', `Logout: akun "${req.user.username}" keluar dari aplikasi`, getDeviceInfo(req), req.user);
+    res.json({ message: 'Logout berhasil dicatat.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auth Endpoint: Get current user profile details (includes full_name)
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const userRes = await pool.query('SELECT id, username, full_name, role FROM users WHERE id = $1;', [req.user.id]);
+    if (userRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+    }
+    res.json(userRes.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User Management API: Get all users (Admin Only)
+app.get('/api/users', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    const usersRes = await pool.query('SELECT id, username, full_name, role, created_at FROM users ORDER BY created_at DESC;');
+    res.json(usersRes.rows);
+  } catch (err) {
+    console.error('Error fetching users:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User Management API: Create new user (Admin Only)
+app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { username, password, role, full_name } = req.body;
+  if (!username || !password || !role) {
+    return res.status(400).json({ error: 'Username, password, dan role wajib diisi.' });
+  }
+
+  const validRoles = ['admin', 'operator', 'viewer'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ error: 'Role tidak valid. Pilih admin, operator, atau viewer.' });
+  }
+
+  try {
+    const checkUser = await pool.query('SELECT id FROM users WHERE username = $1;', [username]);
+    if (checkUser.rowCount > 0) {
+      return res.status(400).json({ error: 'Username sudah digunakan.' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, password_hash, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id, username, full_name, role, created_at;',
+      [username, passwordHash, role, full_name || null]
+    );
+
+    const newUser = result.rows[0];
+    logActivity('create_user', `Membuat akun baru: "${newUser.username}" dengan hak akses ${newUser.role}`, getDeviceInfo(req), req.user);
+    res.status(201).json(newUser);
+  } catch (err) {
+    console.error('Error creating user:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User Management API: Update user (Admin Only)
+app.put('/api/users/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { id } = req.params;
+  const { username, password, role, full_name } = req.body;
+
+  if (!username || !role) {
+    return res.status(400).json({ error: 'Username dan role wajib diisi.' });
+  }
+
+  const validRoles = ['admin', 'operator', 'viewer'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ error: 'Role tidak valid. Pilih admin, operator, atau viewer.' });
+  }
+
+  try {
+    // Check if user exists
+    const checkUser = await pool.query('SELECT id, username FROM users WHERE id = $1;', [id]);
+    if (checkUser.rowCount === 0) {
+      return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+    }
+
+    // Check username uniqueness if changed
+    if (username !== checkUser.rows[0].username) {
+      const checkDup = await pool.query('SELECT id FROM users WHERE username = $1;', [username]);
+      if (checkDup.rowCount > 0) {
+        return res.status(400).json({ error: 'Username sudah digunakan.' });
+      }
+    }
+
+    let result;
+    if (password && password.trim() !== '') {
+      const passwordHash = await bcrypt.hash(password, 10);
+      result = await pool.query(
+        `UPDATE users 
+         SET username = $1, password_hash = $2, role = $3, full_name = $4 
+         WHERE id = $5 
+         RETURNING id, username, full_name, role, created_at;`,
+        [username.trim(), passwordHash, role, full_name || null, id]
+      );
+    } else {
+      result = await pool.query(
+        `UPDATE users 
+         SET username = $1, role = $2, full_name = $3 
+         WHERE id = $4 
+         RETURNING id, username, full_name, role, created_at;`,
+        [username.trim(), role, full_name || null, id]
+      );
+    }
+
+    const updatedUser = result.rows[0];
+    logActivity('update_user', `Memperbarui akun: "${updatedUser.username}" (${updatedUser.role})`, getDeviceInfo(req), req.user);
+    res.json(updatedUser);
+  } catch (err) {
+    console.error('Error updating user:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// User Management API: Delete user (Admin Only)
+app.delete('/api/users/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    if (parseInt(id) === req.user.id) {
+      return res.status(400).json({ error: 'Anda tidak dapat menghapus akun Anda sendiri.' });
+    }
+
+    const deleteRes = await pool.query('DELETE FROM users WHERE id = $1 RETURNING username;', [id]);
+    if (deleteRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Pengguna tidak ditemukan.' });
+    }
+
+    const deletedUsername = deleteRes.rows[0].username;
+    logActivity('delete_user', `Menghapus akun: "${deletedUsername}"`, getDeviceInfo(req), req.user);
+    res.json({ message: `Pengguna ${deletedUsername} berhasil dihapus.` });
+  } catch (err) {
+    console.error('Error deleting user:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 1. Health check & DB connection status
 app.get('/api/health', async (req, res) => {
   try {
@@ -447,7 +835,7 @@ app.get('/api/health', async (req, res) => {
 });
 
 // 1b. Dashboard Statistics
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     // Total files and rows
     const summaryRes = await pool.query(`
@@ -507,13 +895,22 @@ app.get('/api/stats', async (req, res) => {
         AND ip_address IS NOT NULL;
     `);
 
+    // Bookmark categories distribution
+    const bookmarkGroupsRes = await pool.query(`
+      SELECT COALESCE(group_name, 'Umum') AS group_name, COUNT(*) AS count
+      FROM bookmarks
+      GROUP BY group_name
+      ORDER BY count DESC;
+    `);
+
     res.json({
       summary: summaryRes.rows[0],
       topSearches: topSearchRes.rows,
       docsPerUnit: unitRes.rows,
       dailyActivity: dailyRes.rows,
       todayActivity: todayRes.rows,
-      devicesOnline: devicesRes.rows
+      devicesOnline: devicesRes.rows,
+      bookmarkGroups: bookmarkGroupsRes.rows
     });
   } catch (err) {
     console.error('Error stats:', err);
@@ -521,8 +918,34 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// 1c. Reset Dashboard Statistics (Admin only)
+app.post('/api/stats/reset', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    // Truncate activity logs
+    await pool.query('TRUNCATE TABLE activity_logs CASCADE;');
+    
+    // Log the reset event so there's at least one event in logs
+    await pool.query(`
+      INSERT INTO activity_logs (user_id, username, activity_type, activity_details, ip_address, browser, os, device_type)
+      VALUES ($1, $2, 'reset_stats', 'Admin mereset statistik dashboard dan log aktivitas', $3, $4, $5, $6);
+    `, [
+      req.user.id, 
+      req.user.username,
+      req.ip,
+      'Server Backend',
+      'Node.js',
+      'System'
+    ]);
+    
+    res.json({ message: 'Statistik dashboard dan riwayat aktivitas berhasil direset.' });
+  } catch (err) {
+    console.error('Error resetting stats:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 2. Upload Excel File (Triggers background processing)
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', authenticateToken, requireRole(['admin', 'operator']), upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'Tidak ada file yang diunggah!' });
   }
@@ -531,7 +954,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
   console.log(`[Upload] File upload masuk. Memulai Job ID: ${jobId}`);
 
   // Start background process
-  processFileInBackground(jobId, req.file.path, req.file.originalname);
+  processFileInBackground(jobId, req.file.path, req.file.originalname, req.user);
 
   // Respond immediately with jobId
   res.json({
@@ -542,7 +965,7 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 });
 
 // 3. Get background upload job status
-app.get('/api/upload/status/:jobId', (req, res) => {
+app.get('/api/upload/status/:jobId', authenticateToken, requireRole(['admin', 'operator']), (req, res) => {
   const job = uploadJobs[req.params.jobId];
   if (!job) {
     return res.status(404).json({ error: 'Proses impor tidak ditemukan.' });
@@ -551,11 +974,12 @@ app.get('/api/upload/status/:jobId', (req, res) => {
 });
 
 // 4. Search document rows by search query
-app.get('/api/search', async (req, res) => {
+app.get('/api/search', authenticateToken, async (req, res) => {
   const queryText = req.query.q;
   const fileId = req.query.fileId;
   const filterSheet = req.query.sheet; // Optional sheet filter
   const filterUnit = req.query.unit;   // Optional unit filter
+  const uploaderId = req.query.uploaderId; // Optional uploader ID filter
 
   if ((!queryText || queryText.trim() === '') && !fileId) {
     return res.json({ results: [] });
@@ -578,6 +1002,13 @@ app.get('/api/search', async (req, res) => {
         queryParams.push(`%${filterUnit.trim()}%`);
         filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
       }
+      if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+        queryParams.push(parseInt(uploaderId));
+        filterClauses.push(`f.uploaded_by = $${queryParams.length}`);
+      }
+
+      queryParams.push(req.user.id);
+      const userIdParamIndex = queryParams.length;
 
       searchQuery = `
         SELECT 
@@ -591,7 +1022,7 @@ app.get('/api/search', async (req, res) => {
           (b.id IS NOT NULL) AS is_bookmarked
         FROM document_rows r
         JOIN uploaded_files f ON r.file_id = f.id
-        LEFT JOIN bookmarks b ON b.row_id = r.id
+        LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
         WHERE ${filterClauses.join(' AND ')}
         ORDER BY r.sheet_name, r.row_number
         LIMIT 250;
@@ -664,8 +1095,15 @@ app.get('/api/search', async (req, res) => {
           queryParams.push(`%${filterUnit.trim()}%`);
           filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
         }
+        if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+          queryParams.push(parseInt(uploaderId));
+          filterClauses.push(`f.uploaded_by = $${queryParams.length}`);
+        }
 
         const filterSql = filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
+
+        queryParams.push(req.user.id);
+        const userIdParamIndex = queryParams.length;
 
         searchQuery = `
           SELECT 
@@ -680,7 +1118,7 @@ app.get('/api/search', async (req, res) => {
             100 as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
-          LEFT JOIN bookmarks b ON b.row_id = r.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
           WHERE (${containmentClauses.join(' OR ')}) ${filterSql}
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
@@ -734,6 +1172,13 @@ app.get('/api/search', async (req, res) => {
           queryParams.push(`%${filterUnit.trim()}%`);
           whereClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
         }
+        if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+          queryParams.push(parseInt(uploaderId));
+          whereClauses.push(`f.uploaded_by = $${queryParams.length}`);
+        }
+
+        queryParams.push(req.user.id);
+        const userIdParamIndex = queryParams.length;
 
         searchQuery = `
           SELECT 
@@ -748,7 +1193,7 @@ app.get('/api/search', async (req, res) => {
             (${scoreExpressions.join(' + ')}) as relevance_score
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
-          LEFT JOIN bookmarks b ON b.row_id = r.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
           WHERE ${whereClauses.join(' AND ')}
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
@@ -791,8 +1236,15 @@ app.get('/api/search', async (req, res) => {
         fallbackParams.push(`%${filterUnit.trim()}%`);
         fallbackFilterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${fallbackParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${fallbackParams.length})`);
       }
+      if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+        fallbackParams.push(parseInt(uploaderId));
+        fallbackFilterClauses.push(`f.uploaded_by = $${fallbackParams.length}`);
+      }
 
       const fallbackFilterSql = fallbackFilterClauses.length > 0 ? ' AND ' + fallbackFilterClauses.join(' AND ') : '';
+
+      fallbackParams.push(req.user.id);
+      const fallbackUserIdParamIndex = fallbackParams.length;
 
       const fallbackQuery = `
         SELECT 
@@ -811,7 +1263,7 @@ app.get('/api/search', async (req, res) => {
           END) as relevance_score
         FROM document_rows r
         JOIN uploaded_files f ON r.file_id = f.id
-        LEFT JOIN bookmarks b ON b.row_id = r.id
+        LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${fallbackUserIdParamIndex}
         WHERE (r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)) ${fallbackFilterSql}
         ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
         LIMIT 150;
@@ -819,9 +1271,12 @@ app.get('/api/search', async (req, res) => {
       searchRes = await pool.query(fallbackQuery, fallbackParams);
     }
     
-    // Log search activity if it's a real query (not file preview)
+    // Log search activity or file preview
     if (!fileId && queryText && queryText.trim() !== '') {
-      logActivity('search', `Mencari kata kunci: "${queryText.trim()}" (Menghasilkan ${searchRes.rows.length} baris data)`, getDeviceInfo(req));
+      logActivity('search', `Mencari kata kunci: "${queryText.trim()}" (Menghasilkan ${searchRes.rows.length} baris data)`, getDeviceInfo(req), req.user);
+    } else if (fileId) {
+      const filename = searchRes.rows[0] ? searchRes.rows[0].filename : `ID #${fileId}`;
+      logActivity('view_file', `Membuka/melihat berkas: "${filename}"`, getDeviceInfo(req), req.user);
     }
     
     const groupedResults = {};
@@ -851,17 +1306,21 @@ app.get('/api/search', async (req, res) => {
 });
 
 // 5. Get list of all uploaded files
-app.get('/api/files', async (req, res) => {
+app.get('/api/files', authenticateToken, async (req, res) => {
   try {
     const query = `
       SELECT 
-        id, 
-        filename, 
-        sheet_names, 
-        uploaded_at, 
-        row_count
-      FROM uploaded_files
-      ORDER BY uploaded_at DESC;
+        uf.id, 
+        uf.filename, 
+        uf.sheet_names, 
+        uf.uploaded_at, 
+        uf.row_count,
+        uf.uploaded_by,
+        u.username AS uploader_username,
+        u.full_name AS uploader_fullname
+      FROM uploaded_files uf
+      LEFT JOIN users u ON uf.uploaded_by = u.id
+      ORDER BY uf.uploaded_at DESC;
     `;
     const filesRes = await pool.query(query);
     res.json({ files: filesRes.rows });
@@ -872,7 +1331,7 @@ app.get('/api/files', async (req, res) => {
 });
 
 // 5b. Get activity logs (with search + pagination)
-app.get('/api/logs', async (req, res) => {
+app.get('/api/logs', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
     const limit = Math.min(500, Math.max(10, parseInt(req.query.limit) || 50));
@@ -880,7 +1339,7 @@ app.get('/api/logs', async (req, res) => {
     const offset = (page - 1) * limit;
 
     const conditions = q
-      ? `WHERE activity_details ILIKE $1 OR activity_type ILIKE $1 OR ip_address ILIKE $1 OR browser ILIKE $1 OR os ILIKE $1 OR device_label ILIKE $1`
+      ? `WHERE (activity_details ILIKE $1 OR activity_type ILIKE $1 OR ip_address ILIKE $1 OR browser ILIKE $1 OR os ILIKE $1 OR device_label ILIKE $1 OR username ILIKE $1)`
       : '';
     const params = q ? [`%${q}%`] : [];
 
@@ -890,7 +1349,7 @@ app.get('/api/logs', async (req, res) => {
     const total = parseInt(countRes.rows[0].count);
 
     const dataRes = await pool.query(
-      `SELECT id, activity_type, activity_details,
+      `SELECT id, user_id, username, activity_type, activity_details,
               ip_address, browser, os, device_type, device_label, engine, user_agent,
               created_at
        FROM activity_logs
@@ -913,8 +1372,33 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
+// 5c. Reset / clear all activity logs (Admin only)
+app.delete('/api/logs', authenticateToken, requireRole(['admin']), async (req, res) => {
+  try {
+    await pool.query('TRUNCATE TABLE activity_logs CASCADE;');
+    
+    // Create new audit log for the clear action
+    await pool.query(`
+      INSERT INTO activity_logs (user_id, username, activity_type, activity_details, ip_address, browser, os, device_type)
+      VALUES ($1, $2, 'clear_logs', 'Admin membersihkan/reset seluruh riwayat log aktivitas', $3, $4, $5, $6);
+    `, [
+      req.user.id, 
+      req.user.username,
+      req.ip,
+      'Server Backend',
+      'Node.js',
+      'System'
+    ]);
+    
+    res.json({ message: 'Seluruh riwayat log aktivitas berhasil direset.' });
+  } catch (err) {
+    console.error('Error clearing activity logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 6. Delete an uploaded file
-app.delete('/api/files/:id', async (req, res) => {
+app.delete('/api/files/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
   const fileId = req.params.id;
   try {
     const deleteQuery = `DELETE FROM uploaded_files WHERE id = $1 RETURNING filename;`;
@@ -925,7 +1409,7 @@ app.delete('/api/files/:id', async (req, res) => {
     }
 
     const filename = deleteRes.rows[0].filename;
-    await logActivity('delete', `Menghapus berkas "${filename}" beserta seluruh data terkait.`, getDeviceInfo(req));
+    await logActivity('delete', `Menghapus berkas "${filename}" beserta seluruh data terkait.`, getDeviceInfo(req), req.user);
 
     res.json({ 
       success: true, 
@@ -938,7 +1422,7 @@ app.delete('/api/files/:id', async (req, res) => {
 });
 
 // 6b. Bulk delete uploaded files
-app.post('/api/files/bulk-delete', async (req, res) => {
+app.post('/api/files/bulk-delete', authenticateToken, requireRole(['admin']), async (req, res) => {
   const { ids } = req.body;
   if (!ids || !Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: 'Tidak ada file ID yang diberikan!' });
@@ -966,7 +1450,7 @@ app.post('/api/files/bulk-delete', async (req, res) => {
     }
 
     const device = getDeviceInfo(req);
-    await logActivity('delete', `Menghapus massal ${deleteRes.rowCount} berkas: ${filenames.join(', ')}`, device);
+    await logActivity('delete', `Menghapus massal ${deleteRes.rowCount} berkas: ${filenames.join(', ')}`, device, req.user);
 
     await client.query('COMMIT');
     res.json({ 
@@ -983,25 +1467,116 @@ app.post('/api/files/bulk-delete', async (req, res) => {
 });
 
 // 7. Get bookmarks
-app.get('/api/bookmarks', async (req, res) => {
+app.get('/api/bookmarks', authenticateToken, async (req, res) => {
   try {
-    const query = `
-      SELECT 
-        b.id as bookmark_id,
-        b.created_at as bookmarked_at,
-        r.id,
-        r.file_id,
-        r.sheet_name,
-        r.row_number,
-        r.row_data,
-        f.filename,
-        true AS is_bookmarked
-      FROM bookmarks b
-      JOIN document_rows r ON b.row_id = r.id
-      JOIN uploaded_files f ON r.file_id = f.id
-      ORDER BY b.created_at DESC;
-    `;
-    const bookmarkedRes = await pool.query(query);
+    let query;
+    let params = [];
+    
+    if (req.user.role === 'admin' && req.query.userId) {
+      if (req.query.userId === 'all') {
+        query = `
+          SELECT 
+            b.id as bookmark_id,
+            b.created_at as bookmarked_at,
+            b.notes,
+            b.group_name as group_name,
+            b.user_id as owner_id,
+            r.id,
+            r.file_id,
+            r.sheet_name,
+            r.row_number,
+            r.row_data,
+            f.filename,
+            u.username as owner_username,
+            true AS is_bookmarked
+          FROM bookmarks b
+          JOIN document_rows r ON b.row_id = r.id
+          JOIN uploaded_files f ON r.file_id = f.id
+          JOIN users u ON b.user_id = u.id
+          ORDER BY u.username ASC, b.created_at DESC;
+        `;
+      } else if (req.query.userId.includes(',')) {
+        // Handle comma-separated list of IDs
+        const ids = req.query.userId.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+        query = `
+          SELECT 
+            b.id as bookmark_id,
+            b.created_at as bookmarked_at,
+            b.notes,
+            b.group_name as group_name,
+            b.user_id as owner_id,
+            r.id,
+            r.file_id,
+            r.sheet_name,
+            r.row_number,
+            r.row_data,
+            f.filename,
+            u.username as owner_username,
+            true AS is_bookmarked
+          FROM bookmarks b
+          JOIN document_rows r ON b.row_id = r.id
+          JOIN uploaded_files f ON r.file_id = f.id
+          JOIN users u ON b.user_id = u.id
+          WHERE b.user_id = ANY($1::int[])
+          ORDER BY u.username ASC, b.created_at DESC;
+        `;
+        params = [ids];
+      } else {
+        let targetUserId = req.user.id;
+        if (req.query.userId !== 'mine') {
+          targetUserId = parseInt(req.query.userId);
+        }
+        query = `
+          SELECT 
+            b.id as bookmark_id,
+            b.created_at as bookmarked_at,
+            b.notes,
+            b.group_name as group_name,
+            b.user_id as owner_id,
+            r.id,
+            r.file_id,
+            r.sheet_name,
+            r.row_number,
+            r.row_data,
+            f.filename,
+            u.username as owner_username,
+            true AS is_bookmarked
+          FROM bookmarks b
+          JOIN document_rows r ON b.row_id = r.id
+          JOIN uploaded_files f ON r.file_id = f.id
+          JOIN users u ON b.user_id = u.id
+          WHERE b.user_id = $1
+          ORDER BY b.created_at DESC;
+        `;
+        params = [targetUserId];
+      }
+    } else {
+      query = `
+        SELECT 
+          b.id as bookmark_id,
+          b.created_at as bookmarked_at,
+          b.notes,
+          b.group_name as group_name,
+          b.user_id as owner_id,
+          r.id,
+          r.file_id,
+          r.sheet_name,
+          r.row_number,
+          r.row_data,
+          f.filename,
+          u.username as owner_username,
+          true AS is_bookmarked
+        FROM bookmarks b
+        JOIN document_rows r ON b.row_id = r.id
+        JOIN uploaded_files f ON r.file_id = f.id
+        JOIN users u ON b.user_id = u.id
+        WHERE b.user_id = $1
+        ORDER BY b.created_at DESC;
+      `;
+      params = [req.user.id];
+    }
+    
+    const bookmarkedRes = await pool.query(query, params);
     res.json({ bookmarks: bookmarkedRes.rows });
   } catch (err) {
     console.error('Error bookmarks:', err);
@@ -1010,16 +1585,37 @@ app.get('/api/bookmarks', async (req, res) => {
 });
 
 // 8. Add bookmark
-app.post('/api/bookmarks', async (req, res) => {
-  const { rowId } = req.body;
+app.post('/api/bookmarks', authenticateToken, async (req, res) => {
+  const { rowId, userId, group_name } = req.body;
   if (!rowId) {
     return res.status(400).json({ error: 'rowId diperlukan!' });
   }
   try {
+    let targetUserId = req.user.id;
+    let targetUsername = req.user.username;
+    if (req.user.role === 'admin' && userId) {
+      targetUserId = parseInt(userId);
+      const userLookup = await pool.query('SELECT username FROM users WHERE id = $1;', [targetUserId]);
+      if (userLookup.rowCount > 0) {
+        targetUsername = userLookup.rows[0].username;
+      }
+    }
+
+    const cleanGroupName = group_name && group_name.trim() !== '' ? group_name.trim() : 'Umum';
+
     await pool.query(
-      `INSERT INTO bookmarks (row_id) VALUES ($1) ON CONFLICT (row_id) DO NOTHING;`,
-      [rowId]
+      `INSERT INTO bookmarks (user_id, row_id, group_name) 
+       VALUES ($1, $2, $3) 
+       ON CONFLICT (user_id, row_id) 
+       DO UPDATE SET group_name = EXCLUDED.group_name;`,
+      [targetUserId, rowId, cleanGroupName]
     );
+
+    const logDetails = req.user.id === targetUserId
+      ? `Menyimpan baris #${rowId} ke bookmark`
+      : `Admin menyimpan baris #${rowId} ke bookmark milik akun "${targetUsername}"`;
+    logActivity('add_bookmark', logDetails, getDeviceInfo(req), req.user);
+
     res.json({ success: true, message: 'Data berhasil disimpan ke bookmark.' });
   } catch (err) {
     console.error('Error add bookmark:', err);
@@ -1027,11 +1623,54 @@ app.post('/api/bookmarks', async (req, res) => {
   }
 });
 
-// 9. Remove bookmark
-app.delete('/api/bookmarks/:rowId', async (req, res) => {
+// 9. Remove all bookmarks (Admin or self)
+app.delete('/api/bookmarks', authenticateToken, async (req, res) => {
+  try {
+    let targetUserId = req.user.id;
+    let targetUsername = req.user.username;
+    if (req.user.role === 'admin' && req.query.userId) {
+      targetUserId = parseInt(req.query.userId);
+      const userLookup = await pool.query('SELECT username FROM users WHERE id = $1;', [targetUserId]);
+      if (userLookup.rowCount > 0) {
+        targetUsername = userLookup.rows[0].username;
+      }
+    }
+
+    const deleteRes = await pool.query(`DELETE FROM bookmarks WHERE user_id = $1;`, [targetUserId]);
+
+    const logDetails = req.user.id === targetUserId
+      ? `Membersihkan semua bookmark (${deleteRes.rowCount} item)`
+      : `Admin membersihkan semua bookmark (${deleteRes.rowCount} item) milik akun "${targetUsername}"`;
+    logActivity('delete_bookmark', logDetails, getDeviceInfo(req), req.user);
+
+    res.json({ success: true, message: `Berhasil menghapus seluruh bookmark (${deleteRes.rowCount} item).` });
+  } catch (err) {
+    console.error('Error clear all bookmarks:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9b. Remove bookmark
+app.delete('/api/bookmarks/:rowId', authenticateToken, async (req, res) => {
   const rowId = req.params.rowId;
   try {
-    await pool.query(`DELETE FROM bookmarks WHERE row_id = $1;`, [rowId]);
+    let targetUserId = req.user.id;
+    let targetUsername = req.user.username;
+    if (req.user.role === 'admin' && req.query.userId) {
+      targetUserId = parseInt(req.query.userId);
+      const userLookup = await pool.query('SELECT username FROM users WHERE id = $1;', [targetUserId]);
+      if (userLookup.rowCount > 0) {
+        targetUsername = userLookup.rows[0].username;
+      }
+    }
+
+    await pool.query(`DELETE FROM bookmarks WHERE row_id = $1 AND user_id = $2;`, [rowId, targetUserId]);
+
+    const logDetails = req.user.id === targetUserId
+      ? `Menghapus baris #${rowId} dari bookmark`
+      : `Admin menghapus baris #${rowId} dari bookmark milik akun "${targetUsername}"`;
+    logActivity('delete_bookmark', logDetails, getDeviceInfo(req), req.user);
+
     res.json({ success: true, message: 'Bookmark berhasil dihapus.' });
   } catch (err) {
     console.error('Error delete bookmark:', err);
@@ -1039,6 +1678,167 @@ app.delete('/api/bookmarks/:rowId', async (req, res) => {
   }
 });
 
+// 10. Update bookmark notes & group (can be updated by user for own bookmarks, or admin for any bookmark)
+app.put('/api/bookmarks/:rowId', authenticateToken, async (req, res) => {
+  const rowId = req.params.rowId;
+  const { notes, userId, group_name } = req.body;
+  try {
+    let targetUserId = req.user.id;
+    let targetUsername = req.user.username;
+    if (req.user.role === 'admin' && userId) {
+      targetUserId = parseInt(userId);
+      const userLookup = await pool.query('SELECT username FROM users WHERE id = $1;', [targetUserId]);
+      if (userLookup.rowCount > 0) {
+        targetUsername = userLookup.rows[0].username;
+      }
+    }
+
+    const cleanGroupName = group_name && group_name.trim() !== '' ? group_name.trim() : 'Umum';
+    
+    const result = await pool.query(
+      `UPDATE bookmarks 
+       SET notes = $1, group_name = $2 
+       WHERE row_id = $3 AND user_id = $4 
+       RETURNING *;`,
+      [notes, cleanGroupName, rowId, targetUserId]
+    );
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Bookmark tidak ditemukan.' });
+    }
+
+    const logDetails = req.user.id === targetUserId
+      ? `Memperbarui catatan pada bookmark baris #${rowId}`
+      : `Admin memperbarui catatan pada bookmark baris #${rowId} milik akun "${targetUsername}"`;
+    logActivity('edit_bookmark', logDetails, getDeviceInfo(req), req.user);
+
+    res.json({ success: true, bookmark: result.rows[0] });
+  } catch (err) {
+    console.error('Error updating bookmark notes:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 11. Update document row data (can be updated by admin or operator)
+app.put('/api/document-rows/:id', authenticateToken, async (req, res) => {
+  const rowId = req.params.id;
+  const { row_data } = req.body;
+  if (!row_data) {
+    return res.status(400).json({ error: 'row_data diperlukan!' });
+  }
+  try {
+    // Only admin or operator can edit document rows
+    if (req.user.role !== 'admin' && req.user.role !== 'operator') {
+      return res.status(403).json({ error: 'Anda tidak memiliki hak akses untuk mengedit dokumen!' });
+    }
+    
+    const result = await pool.query(
+      `UPDATE document_rows SET row_data = $1 WHERE id = $2 RETURNING *;`,
+      [JSON.stringify(row_data), rowId]
+    );
+    
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Baris dokumen tidak ditemukan.' });
+    }
+    
+    // Log the edit activity
+    await logActivity('edit_document', `Mengedit baris #${rowId} pada dokumen.`, getDeviceInfo(req), req.user);
+    
+    res.json({ success: true, row: result.rows[0] });
+  } catch (err) {
+    console.error('Error updating document row:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 12. Fetch global notifications for a user (with read status)
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  try {
+    const query = `
+      SELECT 
+        n.id,
+        n.message,
+        n.recipient_id,
+        n.created_at,
+        (unr.read_at IS NOT NULL) AS is_read
+      FROM notifications n
+      LEFT JOIN user_notification_reads unr ON unr.notification_id = n.id AND unr.user_id = $1
+      WHERE n.recipient_id IS NULL OR n.recipient_id = $1
+      ORDER BY n.created_at DESC
+      LIMIT 50;
+    `;
+    const result = await pool.query(query, [req.user.id]);
+    res.json({ notifications: result.rows });
+  } catch (err) {
+    console.error('Error fetching notifications:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 13. Send global or targeted notification (Admin only)
+app.post('/api/notifications', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { message, recipientId } = req.body;
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: 'Pesan notifikasi wajib diisi!' });
+  }
+  try {
+    let targetRecipientId = null;
+    let logMsg = `Admin mengirim notifikasi global: "${message.trim()}"`;
+    
+    if (recipientId && recipientId !== 'all') {
+      targetRecipientId = parseInt(recipientId);
+      const recipientRes = await pool.query('SELECT username FROM users WHERE id = $1;', [targetRecipientId]);
+      if (recipientRes.rowCount > 0) {
+        logMsg = `Admin mengirim notifikasi ke ${recipientRes.rows[0].username}: "${message.trim()}"`;
+      }
+    }
+
+    const result = await pool.query(
+      'INSERT INTO notifications (message, recipient_id) VALUES ($1, $2) RETURNING *;',
+      [message.trim(), targetRecipientId]
+    );
+    // Log this activity
+    await logActivity('send_notification', logMsg, getDeviceInfo(req), req.user);
+    res.json({ success: true, notification: result.rows[0] });
+  } catch (err) {
+    console.error('Error sending notification:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 14. Mark notifications as read for current user
+app.post('/api/notifications/read', authenticateToken, async (req, res) => {
+  const { notificationId } = req.body;
+  try {
+    if (notificationId) {
+      // Mark specific notification as read
+      await pool.query(
+        `INSERT INTO user_notification_reads (user_id, notification_id) 
+         VALUES ($1, $2) 
+         ON CONFLICT (user_id, notification_id) DO NOTHING;`,
+        [req.user.id, notificationId]
+      );
+    } else {
+      // Mark all readable notifications as read
+      const readableNotifs = await pool.query(
+        'SELECT id FROM notifications WHERE recipient_id IS NULL OR recipient_id = $1;',
+        [req.user.id]
+      );
+      for (const notif of readableNotifs.rows) {
+        await pool.query(
+          `INSERT INTO user_notification_reads (user_id, notification_id) 
+           VALUES ($1, $2) 
+           ON CONFLICT (user_id, notification_id) DO NOTHING;`,
+          [req.user.id, notif.id]
+        );
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error marking notifications as read:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Global error handler for upload limit
 app.use((err, req, res, next) => {
@@ -1051,6 +1851,22 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: err.message });
   }
   next();
+});
+
+// Serve static files from the React frontend build
+app.use(express.static(path.join(__dirname, '../frontend/dist')));
+
+// Fallback all non-API routes to React's index.html
+app.get('*', (req, res, next) => {
+  if (req.originalUrl.startsWith('/api')) {
+    return next();
+  }
+  const indexPath = path.join(__dirname, '../frontend/dist/index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).send('Aplikasi berjalan dalam mode API. Harap akses via port frontend (5173) atau jalankan "npm run build" pada direktori frontend.');
+  }
 });
 
 // Start Express Server
