@@ -1600,6 +1600,42 @@ function App() {
     }
   };
 
+  // Download file
+  const handleDownloadFile = async (id, filename) => {
+    try {
+      showToast('📥 Mengunduh', `Mengekspor file "${filename}"...`, 'info');
+      const res = await fetch(`${API_URL}/files/${id}/download`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        let errMsg = 'Gagal mengunduh file';
+        try {
+          const errData = await res.json();
+          errMsg = errData.error || errMsg;
+        } catch (_) {}
+        alert(errMsg);
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeFilename = filename.endsWith('.xlsx') || filename.endsWith('.xls') ? filename : `${filename}.xlsx`;
+      a.download = safeFilename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+      showToast('✅ Berhasil', `File "${safeFilename}" siap diunduh.`, 'success');
+    } catch (err) {
+      alert('Error saat mengunduh file: ' + err.message);
+    }
+  };
+
   // Handle Drag-and-Drop events
   const handleDrag = (e) => {
     e.preventDefault();
@@ -3293,15 +3329,38 @@ function App() {
                           Diunggah: {new Date(file.uploaded_at).toLocaleString('id-ID')}
                         </p>
                       </div>
-                      {user.role === 'admin' && (
+                      <div className="file-card-actions" style={{ display: 'flex', gap: '8px', marginTop: '0.75rem', flexWrap: 'wrap' }}>
                         <button 
-                          className="delete-file-btn" 
-                          onClick={() => handleDeleteFile(file.id, file.filename)}
-                          title="Hapus file dan seluruh datanya"
+                          className="download-file-btn" 
+                          onClick={() => handleDownloadFile(file.id, file.filename)}
+                          title="Unduh berkas Excel ini"
+                          style={{
+                            padding: '0.45rem 0.85rem',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(59, 130, 246, 0.4)',
+                            background: 'rgba(59, 130, 246, 0.15)',
+                            color: '#60a5fa',
+                            cursor: 'pointer',
+                            fontSize: '0.82rem',
+                            fontWeight: '600',
+                            transition: 'all 0.2s ease',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px'
+                          }}
                         >
-                          🗑️ Hapus
+                          📥 Unduh Excel
                         </button>
-                      )}
+                        {user.role === 'admin' && (
+                          <button 
+                            className="delete-file-btn" 
+                            onClick={() => handleDeleteFile(file.id, file.filename)}
+                            title="Hapus file dan seluruh datanya"
+                          >
+                            🗑️ Hapus
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>

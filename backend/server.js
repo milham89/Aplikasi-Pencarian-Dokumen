@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const ExcelJS = require('exceljs');
+const xlsx = require('xlsx');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -1976,6 +1977,58 @@ app.post('/api/files/bulk-delete', authenticateToken, requireRole(['admin']), as
     res.status(500).json({ error: 'Gagal menghapus berkas massal: ' + err.message });
   } finally {
     client.release();
+  }
+});
+
+// 6c. Download uploaded file reconstructed from database
+app.get('/api/files/:id/download', authenticateToken, async (req, res) => {
+  const fileId = req.params.id;
+  try {
+    const fileRes = await pool.query(`SELECT id, filename, sheet_names FROM uploaded_files WHERE id = $1`, [fileId]);
+    if (fileRes.rows.length === 0) {
+      return res.status(404).json({ error: 'File tidak ditemukan!' });
+    }
+
+    const { filename } = fileRes.rows[0];
+
+    const rowsRes = await pool.query(
+      `SELECT sheet_name, row_number, row_data FROM document_rows WHERE file_id = $1 ORDER BY sheet_name, row_number ASC`,
+      [fileId]
+    );
+
+    if (rowsRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Data baris file ini tidak ditemukan!' });
+    }
+
+    // Group rows by sheet_name
+    const sheetsMap = {};
+    for (const r of rowsRes.rows) {
+      if (!sheetsMap[r.sheet_name]) {
+        sheetsMap[r.sheet_name] = [];
+      }
+      sheetsMap[r.sheet_name].push(r.row_data);
+    }
+
+    const wb = xlsx.utils.book_new();
+    for (const sheetName of Object.keys(sheetsMap)) {
+      const ws = xlsx.utils.json_to_sheet(sheetsMap[sheetName]);
+      xlsx.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
+    }
+
+    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const safeFilename = filename.endsWith('.xlsx') || filename.endsWith('.xls') ? filename : `${filename}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeFilename)}"`);
+    res.setHeader('Content-Length', buffer.length);
+
+    await logActivity('download', `Mengunduh berkas Excel "${filename}".`, getDeviceInfo(req), req.user);
+
+    return res.send(buffer);
+  } catch (err) {
+    console.error('Error saat mengunduh file:', err);
+    return res.status(500).json({ error: 'Gagal mengunduh file: ' + err.message });
   }
 });
 
