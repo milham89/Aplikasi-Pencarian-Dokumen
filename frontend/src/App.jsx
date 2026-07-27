@@ -1604,11 +1604,7 @@ function App() {
   const handleDownloadFile = async (id, filename) => {
     try {
       showToast('📥 Mengunduh', `Mengekspor file "${filename}"...`, 'info');
-      const res = await fetch(`${API_URL}/files/${id}/download`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const res = await apiFetch(`/api/files/${id}/download`);
 
       if (!res.ok) {
         let errMsg = 'Gagal mengunduh file';
