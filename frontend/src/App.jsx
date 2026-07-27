@@ -72,14 +72,59 @@ function App() {
   // Search state
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [searchStats, setSearchStats] = useState({ totalMatches: 0, timeMs: 0 });
   const [searchUIState, setSearchUIState] = useState('loading'); // 'welcome' | 'preview' | 'loading' | 'results' | 'empty'
+  const [searchProgress, setSearchProgress] = useState(0); // 1 - 100% progress
   const [selectedFileId, setSelectedFileId] = useState(null); // Active file tab in results
+
+  // Manage smooth 1 to 100% progress animation during loading state
+  useEffect(() => {
+    let timer;
+    if (searchUIState === 'loading') {
+      setSearchProgress(10);
+      timer = setInterval(() => {
+        setSearchProgress(prev => {
+          if (prev >= 92) {
+            clearInterval(timer);
+            return prev;
+          }
+          const step = prev < 40 ? 15 : prev < 75 ? 8 : prev < 88 ? 3 : 1;
+          return Math.min(92, prev + step);
+        });
+      }, 90);
+    } else {
+      setSearchProgress(100);
+    }
+    return () => clearInterval(timer);
+  }, [searchUIState]);
   
   // Advanced filters state
   const [filterSheet, setFilterSheet] = useState('');
   const [filterUnit, setFilterUnit] = useState('');
   const [searchUploaderFilter, setSearchUploaderFilter] = useState('all');
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [enableAISearch, setEnableAISearch] = useState(true);
+  const [aiSearchInfo, setAiSearchInfo] = useState({ used: false, method: 'none' });
+  const [editingCell, setEditingCell] = useState(null); // { rowId, headerKey }
+  const [editCellValue, setEditCellValue] = useState('');
+  const [isSavingCell, setIsSavingCell] = useState(false);
+
+  // AI Chatbot State
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([
+    {
+      id: 'welcome',
+      sender: 'ai',
+      text: 'Halo! Saya **SpreadSheet AI Assistant** 🤖. Saya siap membantu Anda menganalisis, merangkum, dan menjawab pertanyaan seputar berkas dokumen arsip di database.',
+      timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+      sources: []
+    }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatSelectedFileId, setChatSelectedFileId] = useState('all');
+  const [chatModelMode, setChatModelMode] = useState('auto'); // 'auto' | 'gemini' | 'local'
+  const [highlightedRowNumber, setHighlightedRowNumber] = useState(null);
 
   // Search History state
   const [searchHistory, setSearchHistory] = useState(() => {
@@ -121,7 +166,29 @@ function App() {
   });
   const [showBookmarkColumnFilter, setShowBookmarkColumnFilter] = useState(false);
   const [bookmarkColumnSearchQuery, setBookmarkColumnSearchQuery] = useState('');
+  const skipDebouncedSearchRef = useRef(false);
+  const isManualTypingRef = useRef(false);
+  const [copiedLogId, setCopiedLogId] = useState(null);
+
+  const handleCopyLog = (log) => {
+    const textToCopy = `[${new Date(log.created_at).toLocaleString('id-ID')}] Account: ${log.username || '-'} | Type: ${log.activity_type} | Detail: ${log.activity_details} | IP: ${log.ip_address || '-'} | OS: ${log.os || '-'} | Browser: ${log.browser || '-'}`;
+    navigator.clipboard.writeText(textToCopy);
+    setCopiedLogId(log.id);
+    setTimeout(() => setCopiedLogId(null), 2000);
+  };
   
+  // Auto-scroll to AI cited row highlight when clicking reference chips
+  useEffect(() => {
+    if (highlightedRowNumber && (searchUIState === 'preview' || searchUIState === 'results')) {
+      const timer = setTimeout(() => {
+        const el = document.getElementById(`row-cited-${highlightedRowNumber}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [highlightedRowNumber, searchUIState, searchResults]);
   // Files state
   const [filesList, setFilesList] = useState([]);
   const [loadingFiles, setLoadingFiles] = useState(false);
@@ -144,6 +211,11 @@ function App() {
   const [uploadError, setUploadError] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+
+  // Deleting state
+  const [deleting, setDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState(0);
+  const [deleteStatusMessage, setDeleteStatusMessage] = useState('');
 
   // User Management state
   const [usersList, setUsersList] = useState([]);
@@ -258,10 +330,10 @@ function App() {
     }
   }, [user, usersList]);
 
-  // Initial preview trigger when files list is first loaded
+  // Set initial preview state when files list is first loaded
   useEffect(() => {
     if (searchQuery.trim() === '' && filesList.length > 0 && !selectedFileId) {
-      fetchFilePreview(filesList[0].id);
+      setSearchUIState('preview');
     }
   }, [filesList]);
 
@@ -283,12 +355,18 @@ function App() {
     }
     window.history.replaceState({}, '', url);
 
+    // If search query is empty, restore document preview mode without forcing filesList[0]
     if (searchQuery.trim() === '') {
+      skipDebouncedSearchRef.current = false;
+      isManualTypingRef.current = false;
       if (filesList.length > 0) {
-        const activeId = selectedFileId && filesList.some(f => f.id === selectedFileId) 
-          ? selectedFileId 
-          : filesList[0].id;
-        fetchFilePreview(activeId, filterSheet, filterUnit);
+        if (selectedFileId && filesList.some(f => String(f.id) === String(selectedFileId))) {
+          fetchFilePreview(selectedFileId, filterSheet, filterUnit, null, '');
+        } else {
+          setSearchResults([]);
+          setSelectedFileId(null);
+          setSearchUIState('preview');
+        }
       } else {
         setSearchResults([]);
         setSelectedFileId(null);
@@ -297,14 +375,20 @@ function App() {
       return;
     }
 
+    if (skipDebouncedSearchRef.current || !isManualTypingRef.current) {
+      skipDebouncedSearchRef.current = false;
+      return;
+    }
+
     setSearchUIState('loading');
 
     const timer = setTimeout(() => {
+      isManualTypingRef.current = false;
       handleSearch();
     }, 600);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, filterSheet, filterUnit]);
+  }, [searchQuery, filterSheet, filterUnit, filesList]);
 
   // Check backend & DB status
   const checkHealth = async () => {
@@ -663,16 +747,18 @@ function App() {
   useEffect(() => {
     if (token) {
       fetchNotifications();
-      const interval = setInterval(fetchNotifications, 15000);
+      const interval = setInterval(() => {
+        fetchNotifications();
+      }, 30000);
       return () => clearInterval(interval);
     }
-  }, [token, fetchNotifications]);
+  }, [token]);
 
   useEffect(() => {
-    if (user?.role === 'admin' && (activeTab === 'users' || activeTab === 'bookmarks')) {
+    if (token && user?.role === 'admin') {
       fetchUsers();
     }
-  }, [activeTab, user, fetchUsers]);
+  }, [token, user?.role]);
 
   // Share link
   const handleShareLink = () => {
@@ -788,7 +874,7 @@ function App() {
       fetchUserProfile();
       fetchFiles();
     }
-  }, [token, fetchUserProfile]);
+  }, [token]);
 
   // Get list of uploaded files
   const fetchFiles = async () => {
@@ -864,14 +950,34 @@ function App() {
     localStorage.removeItem('spreadsheet_search_history');
   };
 
-  // Fetch and display a preview of a file (first 200 rows)
-  const fetchFilePreview = async (fileId, sheet = filterSheet, unit = filterUnit) => {
+  // Fetch File Preview with optional targetRowNumber highlight and query text filter
+  const fetchFilePreview = async (fileId, sheet = null, unit = null, targetRowNumber = null, queryOverride = null, sheetName = null) => {
     setSearchUIState('loading');
     setSearchResults([]);
+    setAiSearchInfo({ used: false, method: 'none' });
     try {
-      const params = new URLSearchParams({ fileId });
+      const params = new URLSearchParams({ fileId: fileId.toString() });
+      const activeQ = queryOverride !== null ? queryOverride : searchQuery;
+      // Strip conversational words so backend gets only the keyword
+      if (activeQ && activeQ.trim() !== '') {
+        const stopWords = new Set([
+          'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+          'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+          'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+          'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+          'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat', 'berapa',
+          'apakah', 'siapa', 'bagaimana', 'apa', 'tolong', 'jelaskan', 'rangkum', 'semua',
+          'daftar', 'total', 'ada', 'berurutan', 'entry', 'entri'
+        ]);
+        const rawTerms = activeQ.trim().split(/[\s\.]+/).filter(Boolean);
+        const filtered = rawTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length >= 2);
+        const cleanQ = (filtered.length > 0 ? filtered : rawTerms).join(' ');
+        if (cleanQ.trim() !== '') params.append('q', cleanQ.trim());
+      }
       if (sheet) params.append('sheet', sheet);
+      if (sheetName) params.append('sheetName', sheetName);
       if (unit) params.append('unit', unit);
+      if (targetRowNumber) params.append('rowNumber', targetRowNumber.toString());
       if (user?.role === 'admin' && searchUploaderFilter !== 'all') {
         params.append('uploaderId', searchUploaderFilter);
       }
@@ -883,6 +989,11 @@ function App() {
         if (data.results.length > 0) {
           setSelectedFileId(fileId);
           setSearchUIState('preview');
+          if (targetRowNumber) {
+            setHighlightedRowNumber(parseInt(targetRowNumber, 10));
+          } else {
+            setHighlightedRowNumber(null);
+          }
         } else {
           setSearchUIState('empty');
         }
@@ -913,6 +1024,7 @@ function App() {
       const params = new URLSearchParams({ q: searchQuery });
       if (filterSheet) params.append('sheet', filterSheet);
       if (filterUnit) params.append('unit', filterUnit);
+      if (enableAISearch) params.append('ai', 'true');
       if (user?.role === 'admin' && searchUploaderFilter !== 'all') {
         params.append('uploaderId', searchUploaderFilter);
       }
@@ -923,13 +1035,29 @@ function App() {
       if (res.ok) {
         const data = await res.json();
         setSearchResults(data.results);
+        setSearchStats({
+          totalMatches: data.totalMatchesCount || 0,
+          timeMs: data.executionTimeMs || 0
+        });
+        setAiSearchInfo({ used: !!data.aiSearchUsed, method: data.aiMethod || 'none' });
         
         // Save to search history
         addToHistory(searchQuery);
 
-        // Auto select the first file in the search results to display it instantly
+        // Pertahankan pilihan berkas jika pengguna sudah memilihnya sebelumnya dan masih ada di hasil.
+        // Jika pengguna belum memilih berkas, biarkan selectedFileId = null agar pengguna memilih dokumen sendiri.
         if (data.results.length > 0) {
-          setSelectedFileId(data.results[0].fileId);
+          const currentIdStillExists = selectedFileId && data.results.some(
+            r => String(r.fileId) === String(selectedFileId)
+          );
+
+          if (currentIdStillExists) {
+            // Refresh tabel untuk berkas yang sedang dipilih oleh pengguna
+            fetchFilePreview(selectedFileId, filterSheet, filterUnit, null, searchQuery);
+          } else {
+            // Pengguna belum memilih / berkas sebelumnya tidak ada di hasil → minta pengguna memilih berkas
+            setSelectedFileId(null);
+          }
           setSearchUIState('results');
         } else {
           setSelectedFileId(null);
@@ -948,13 +1076,12 @@ function App() {
     }
   };
 
-  // Handle file tab click
+  // Handle file tab click - explicitly fetch preview rows for clicked fileId
   const handleFileTabClick = (fileId) => {
-    if (searchQuery.trim() === '') {
-      fetchFilePreview(fileId, filterSheet, filterUnit);
-    } else {
-      setSelectedFileId(fileId);
-    }
+    skipDebouncedSearchRef.current = true;
+    isManualTypingRef.current = false;
+    setSelectedFileId(fileId);
+    fetchFilePreview(fileId, filterSheet, filterUnit, null, searchQuery);
   };
 
   // Helper to check if a column is visible
@@ -1066,6 +1193,181 @@ function App() {
     } finally {
       setLoadingBookmarks(false);
     }
+  };
+
+  // Save inline cell edit to PostgreSQL database
+  const handleSaveCell = async (rowId, headerKey, originalValue, currentMatches) => {
+    // If the value hasn't changed, just close editing mode
+    if (editCellValue.trim() === (originalValue || '').trim()) {
+      setEditingCell(null);
+      return;
+    }
+
+    setIsSavingCell(true);
+    try {
+      // Find the row matches object to copy other column values
+      const matchingRow = currentMatches.find(m => m.id === rowId);
+      if (!matchingRow) {
+        throw new Error('Baris dokumen tidak ditemukan dalam state.');
+      }
+
+      // Prepare updated row_data payload
+      const updatedRowData = {
+        ...matchingRow.rowData,
+        [headerKey]: editCellValue
+      };
+
+      const res = await apiFetch(`/api/document-rows/${rowId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ row_data: updatedRowData })
+      });
+
+      if (res.ok) {
+        // Update local search results state immediately so the table updates visually
+        setSearchResults(prevResults => {
+          return prevResults.map(file => {
+            const updatedMatches = file.matches.map(m => {
+              if (m.id === rowId) {
+                return { ...m, rowData: updatedRowData };
+              }
+              return m;
+            });
+            return { ...file, matches: updatedMatches };
+          });
+        });
+
+        toast.success('Data sel berhasil diperbarui!');
+      } else {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Gagal menyimpan perubahan.');
+      }
+    } catch (err) {
+      console.error('Error saving document row cell:', err);
+      toast.error(`Gagal memperbarui data: ${err.message}`);
+    } finally {
+      setIsSavingCell(false);
+      setEditingCell(null);
+    }
+  };
+
+  const handleCancelEdit = () => {
+    setEditingCell(null);
+    setEditCellValue('');
+  };
+
+  // Handle AI Chatbot message sending
+  const handleSendChatMessage = async (presetText = null) => {
+    const textToSend = presetText || chatInput;
+    if (!textToSend || !textToSend.trim() || isChatLoading) return;
+
+    const userMessage = {
+      id: crypto.randomUUID(),
+      sender: 'user',
+      text: textToSend.trim(),
+      timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+      sources: []
+    };
+
+    setChatMessages(prev => [...prev, userMessage]);
+    if (!presetText) setChatInput('');
+    setIsChatLoading(true);
+
+    const historyPayload = chatMessages
+      .filter(m => m.id !== 'welcome')
+      .slice(-4)
+      .map(m => ({
+        role: m.sender === 'user' ? 'user' : 'model',
+        parts: [{ text: m.text }]
+      }));
+
+    try {
+      const res = await apiFetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userMessage.text,
+          history: historyPayload,
+          fileId: chatSelectedFileId,
+          modelMode: chatModelMode
+        })
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        const aiMessage = {
+          id: crypto.randomUUID(),
+          sender: 'ai',
+          text: data.answer,
+          timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+          sources: data.sources || [],
+          methodUsed: data.methodUsed,
+          userQuery: textToSend
+        };
+        setChatMessages(prev => [...prev, aiMessage]);
+      } else {
+        let errorMsg = `Server mengembalikan status ${res.status}`;
+        try {
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const err = await res.json();
+            errorMsg = err.error || err.message || errorMsg;
+          } else {
+            const text = await res.text();
+            if (res.status === 504 || text.includes('504 Gateway') || text.includes('Timeout')) {
+              errorMsg = 'Koneksi ke server mengalami batas waktu (Timeout 504). Silakan coba lagi.';
+            } else if (res.status === 502 || text.includes('502 Bad Gateway')) {
+              errorMsg = 'Server backend tidak dapat dijangkau (Bad Gateway 502).';
+            } else {
+              errorMsg = `Server mengembalikan error (Status ${res.status})`;
+            }
+          }
+        } catch (_) {}
+        throw new Error(errorMsg);
+      }
+    } catch (err) {
+      console.error('Chat error:', err);
+      const errorMessage = {
+        id: crypto.randomUUID(),
+        sender: 'ai',
+        text: `Maaf, terjadi kesalahan saat menghubungi AI Chatbot: ${err.message}`,
+        timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+        sources: []
+      };
+      setChatMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const handleSourceClick = (fileId, filename, rowNumber = null, userQuery = '', sheetName = null) => {
+    skipDebouncedSearchRef.current = true;
+    isManualTypingRef.current = false;
+    // Show only the keyword part (strip conversational words) in search box
+    if (userQuery && userQuery.trim() !== '') {
+      const stopWords = new Set([
+        'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+        'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+        'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+        'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+        'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat', 'berapa',
+        'apakah', 'siapa', 'bagaimana', 'apa', 'tolong', 'jelaskan', 'rangkum', 'semua',
+        'daftar', 'total', 'ada', 'berurutan', 'entry', 'entri'
+      ]);
+      const rawTerms = userQuery.trim().split(/[\s\.]+/).filter(Boolean);
+      const filtered = rawTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length >= 2);
+      const cleanQ = (filtered.length > 0 ? filtered : rawTerms).join(' ');
+      setSearchQuery(cleanQ);
+    } else {
+      setSearchQuery('');
+    }
+    if (fileId) {
+      fetchFilePreview(fileId, null, null, rowNumber, userQuery, sheetName);
+    } else if (filename) {
+      setSearchQuery(filename);
+    }
+    setActiveTab('search');
+    setIsChatOpen(false);
   };
 
   // Toggle row bookmark state
@@ -1182,6 +1484,42 @@ function App() {
     }
   };
 
+  // Helper to start fake progress for deletion
+  const startDeleteProgress = (message) => {
+    setDeleting(true);
+    setDeleteProgress(5);
+    setDeleteStatusMessage(message);
+    
+    const progressMessages = [
+      'Menghubungi server...',
+      'Memverifikasi hak akses berkas...',
+      'Membatalkan indeks pencarian terkait...',
+      'Menghapus baris-baris dokumen dari database...',
+      'Membersihkan metadata berkas...',
+      'Menghapus entitas fisik...',
+      'Menyinkronkan status database...',
+      'Hampir selesai...'
+    ];
+    
+    let currentPercent = 5;
+    const interval = setInterval(() => {
+      currentPercent += Math.floor(Math.random() * 8) + 5; // increment by 5-12%
+      if (currentPercent > 92) {
+        currentPercent = 92;
+        clearInterval(interval);
+      }
+      setDeleteProgress(currentPercent);
+      
+      const msgIndex = Math.min(
+        Math.floor((currentPercent / 100) * progressMessages.length),
+        progressMessages.length - 1
+      );
+      setDeleteStatusMessage(progressMessages[msgIndex]);
+    }, 250);
+    
+    return interval;
+  };
+
   // Bulk delete selected files
   const handleBulkDelete = async () => {
     if (selectedFileIds.length === 0) return;
@@ -1195,6 +1533,8 @@ function App() {
       return;
     }
 
+    const progressInterval = startDeleteProgress(`Memulai penghapusan massal ${selectedFileIds.length} berkas...`);
+
     try {
       const res = await apiFetch('/api/files/bulk-delete', {
         method: 'POST',
@@ -1202,16 +1542,26 @@ function App() {
         body: JSON.stringify({ ids: selectedFileIds })
       });
 
+      clearInterval(progressInterval);
       const data = await res.json();
+      
       if (res.ok) {
-        showToast('🗑️ Penghapusan Massal Sukses', `${selectedFileIds.length} file berhasil dihapus secara permanen.`, 'success');
-        setSelectedFileIds([]);
-        setSelectedFileId(null);
-        fetchFiles();
+        setDeleteProgress(100);
+        setDeleteStatusMessage('Penghapusan massal sukses!');
+        setTimeout(() => {
+          setDeleting(false);
+          showToast('🗑️ Penghapusan Massal Sukses', `${selectedFileIds.length} file berhasil dihapus secara permanen.`, 'success');
+          setSelectedFileIds([]);
+          setSelectedFileId(null);
+          fetchFiles();
+        }, 500);
       } else {
+        setDeleting(false);
         showToast('⚠️ Gagal Hapus Massal', data.error || 'Terjadi kesalahan.', 'error');
       }
     } catch (err) {
+      clearInterval(progressInterval);
+      setDeleting(false);
       console.error('Error bulk delete:', err);
       showToast('⚠️ Error Koneksi', 'Gagal menghubungi server.', 'error');
     }
@@ -1223,17 +1573,29 @@ function App() {
       return;
     }
 
+    const progressInterval = startDeleteProgress(`Memulai penghapusan berkas "${filename}"...`);
+
     try {
       const res = await apiFetch(`/api/files/${id}`, { method: 'DELETE' });
+      clearInterval(progressInterval);
+      
       if (res.ok) {
-        showToast('🗑️ File Dihapus', `Berkas "${filename}" berhasil dihapus.`, 'success');
-        setSelectedFileId(null);
-        fetchFiles();
+        setDeleteProgress(100);
+        setDeleteStatusMessage('Berkas berhasil dihapus!');
+        setTimeout(() => {
+          setDeleting(false);
+          showToast('🗑️ File Dihapus', `Berkas "${filename}" berhasil dihapus.`, 'success');
+          setSelectedFileId(null);
+          fetchFiles();
+        }, 500);
       } else {
+        setDeleting(false);
         const data = await res.json();
         alert('Gagal menghapus file: ' + (data.error || 'Unknown error'));
       }
     } catch (err) {
+      clearInterval(progressInterval);
+      setDeleting(false);
       alert('Error saat menghapus file: ' + err.message);
     }
   };
@@ -1349,18 +1711,22 @@ function App() {
   };
 
   // Helper function to highlight query matches (token-based / Google-style)
+  // Helper function to highlight query matches (Google-style highlighting)
   const highlightText = (text, highlight) => {
     if (text === null || text === undefined) return '';
     const textStr = text.toString();
     if (!highlight || highlight.trim() === '') return textStr;
     
-    // Split highlight query into individual tokens (split by spaces or dots)
     const baseTokens = highlight.trim().split(/[\s\.]+/).filter(Boolean);
     if (baseTokens.length === 0) return textStr;
 
-    // Generate tokens, splitting mixed alphanumeric tokens (like A001 into A and 001) for partial highlights
+    // Filter out common Indonesian stopwords unless query is only stop words
+    const stopWords = new Set(['data', 'dan', 'di', 'ke', 'dari', 'yang', 'pada', 'untuk']);
+    const nonStopTokens = baseTokens.filter(t => !stopWords.has(t.toLowerCase()));
+    const targetTokens = nonStopTokens.length > 0 ? nonStopTokens : baseTokens;
+
     const tokens = [];
-    baseTokens.forEach(t => {
+    targetTokens.forEach(t => {
       tokens.push(t);
       const match = t.match(/^([a-zA-Z]+)(0*[1-9]\d*)$/);
       if (match) {
@@ -1368,20 +1734,21 @@ function App() {
         tokens.push(match[2]); // digits (e.g. 001)
       }
     });
-    if (tokens.length === 0) return textStr;
+
+    const escapedTokens = Array.from(new Set(tokens))
+      .map(t => t.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'))
+      .filter(Boolean);
+
+    if (escapedTokens.length === 0) return textStr;
     
-    // Create a regex that matches any of the tokens
-    // Escape special characters for each token
-    const escapedTokens = tokens.map(t => t.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'));
-    const regexPattern = `(${escapedTokens.join('|')})`;
-    const regex = new RegExp(regexPattern, 'gi');
-    
-    const parts = textStr.split(regex);
-    
+    const splitRegex = new RegExp(`(${escapedTokens.join('|')})`, 'gi');
+    const parts = textStr.split(splitRegex);
+    const testRegex = new RegExp(`^(${escapedTokens.join('|')})$`, 'i');
+
     return (
       <>
         {parts.map((part, i) => 
-          regex.test(part) 
+          testRegex.test(part) 
             ? <mark key={i} className="highlight">{part}</mark> 
             : part
         )}
@@ -1462,7 +1829,7 @@ function App() {
 
   // Find headers (keys) from all rows in the active file search results
   const getActiveFileHeaders = () => {
-    const activeFile = searchResults.find(f => f.fileId === selectedFileId);
+    const activeFile = searchResults.find(f => String(f.fileId) === String(selectedFileId));
     if (!activeFile || activeFile.matches.length === 0) return [];
     
     // Aggregate all keys from all matching rows
@@ -1481,7 +1848,9 @@ function App() {
   };
 
   const activeHeaders = getActiveFileHeaders();
-  const selectedFileData = searchResults.find(f => f.fileId === selectedFileId);
+  const selectedFileData = selectedFileId 
+    ? (searchResults.find(f => String(f.fileId) === String(selectedFileId)) || null) 
+    : null;
 
   if (!token || !user) {
     return (
@@ -1515,7 +1884,7 @@ function App() {
             <span className="stats-item">⚡ <strong>{stats.totalRows.toLocaleString('id-ID')}</strong> Baris</span>
             <span className="stats-divider">|</span>
             <span className="stats-item" style={{ color: 'var(--text-secondary)' }}>
-              📅 {currentTime.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })} • ⏰ {currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+              📅 {currentTime.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })} • ⏰ {currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
             </span>
           </div>
           
@@ -1591,7 +1960,7 @@ function App() {
               <span className="username-label" style={{ fontWeight: '700' }} title={user.username}>
                 {user.full_name || user.username}
               </span>
-              <span className="role-label">{user.role.toUpperCase()}</span>
+              <span className={`role-label role-${user.role}`}>{user.role.toUpperCase()}</span>
             </div>
             <button className="logout-btn" onClick={handleLogout} title="Keluar dari Aplikasi">
               🚪 Keluar
@@ -1676,7 +2045,10 @@ function App() {
                   className="search-input"
                   placeholder="Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    isManualTypingRef.current = true;
+                    setSearchQuery(e.target.value);
+                  }}
                 />
                 {searchQuery && (
                   <button className="clear-btn" onClick={() => setSearchQuery('')}>✕</button>
@@ -1751,6 +2123,25 @@ function App() {
                     </select>
                   </div>
                 )}
+                <div className="filter-group ai-search-toggle-group">
+                  <label className="ai-checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={enableAISearch}
+                      onChange={(e) => {
+                        const val = e.target.checked;
+                        setEnableAISearch(val);
+                        if (searchQuery.trim() !== '') {
+                          setTimeout(() => {
+                            handleSearch();
+                          }, 50);
+                        }
+                      }}
+                    />
+                    <span className="ai-checkbox-custom"></span>
+                    <span>Aktifkan Pencarian Konteks AI</span>
+                  </label>
+                </div>
                 {(filterSheet || filterUnit || (user?.role === 'admin' && searchUploaderFilter !== 'all')) && (
                   <button
                     className="clear-filters-btn"
@@ -1799,8 +2190,32 @@ function App() {
 
             {searchUIState === 'loading' && (
               <div className="search-loader">
-                <div className="spinner"></div>
-                <p>Mengambil data dari database...</p>
+                <div className="progress-bar-header">
+                  <span className="loader-status-text">⚡ Mengambil data dari database...</span>
+                  <span className="loader-percent-text">{Math.min(100, Math.max(1, Math.round(searchProgress)))}%</span>
+                </div>
+                <div className="progress-bar-container">
+                  <div 
+                    className="progress-bar-fill" 
+                    style={{ width: `${Math.min(100, Math.max(1, Math.round(searchProgress)))}%` }}
+                  ></div>
+                </div>
+              </div>
+            )}
+
+            {/* Google-Style Search Statistics Banner */}
+            {searchUIState === 'results' && searchQuery.trim() !== '' && (
+              <div className="google-search-stats-banner">
+                <div className="google-stats-info">
+                  🔍 Menampilkan hasil pencarian untuk <strong>"{searchQuery.trim()}"</strong> — 
+                  Sekitar <strong>{searchStats.totalMatches || searchResults.reduce((acc, f) => acc + (f.matches ? f.matches.length : 0), 0)}</strong> baris cocok di <strong>{searchResults.length}</strong> dokumen
+                  {searchStats.timeMs > 0 && <span className="google-time-text"> ({(searchStats.timeMs / 1000).toFixed(2)} detik)</span>}
+                </div>
+                {aiSearchInfo.used && (
+                  <div className="google-ai-tag">
+                    ⚡ AI Smart Search ({aiSearchInfo.method === 'gemini' ? 'Gemini 2.0' : 'Vektor Lokal'})
+                  </div>
+                )}
               </div>
             )}
 
@@ -1826,7 +2241,7 @@ function App() {
                         return displayedFiles.map(file => (
                           <button
                             key={file.id}
-                            className={`file-tab-btn ${selectedFileId === file.id ? 'active' : ''}`}
+                            className={`file-tab-btn ${String(selectedFileId) === String(file.id) ? 'active' : ''}`}
                             onClick={() => handleFileTabClick(file.id)}
                             style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '4px' }}
                           >
@@ -1851,7 +2266,7 @@ function App() {
                         return (
                           <button
                             key={file.fileId}
-                            className={`file-tab-btn ${selectedFileId === file.fileId ? 'active' : ''}`}
+                            className={`file-tab-btn ${String(selectedFileId) === String(file.fileId) ? 'active' : ''}`}
                             onClick={() => handleFileTabClick(file.fileId)}
                             style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: '4px' }}
                           >
@@ -1873,11 +2288,18 @@ function App() {
 
                 {/* Right Side: Data table of the selected file */}
                 <div className="results-view">
-                  {selectedFileData && (
+                  {selectedFileData ? (
                     <div className="results-card">
                       <div className="results-card-header">
                         <div>
-                          <h2>📁 {selectedFileData.filename}</h2>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                            <h2 style={{ margin: 0 }}>📁 {selectedFileData.filename}</h2>
+                            {aiSearchInfo.used && (
+                              <span className={`ai-badge ai-badge-${aiSearchInfo.method}`} title={`Metode Pencarian: ${aiSearchInfo.method === 'gemini' ? 'Google Gemini API (Free Tier)' : 'Model Vektor Lokal (TF-IDF)'}`}>
+                                ✨ AI Search ({aiSearchInfo.method === 'gemini' ? 'Gemini API' : 'Model Lokal'})
+                              </span>
+                            )}
+                          </div>
                           <p className="file-meta-date">
                             {searchQuery.trim() === '' 
                               ? `Mode Pratinjau (Menampilkan 200 baris pertama) • Diunggah: ${new Date(selectedFileData.uploadedAt).toLocaleString('id-ID')}`
@@ -2049,6 +2471,7 @@ function App() {
                                 <thead>
                                   <tr>
                                     <th style={{ width: '40px', textAlign: 'center' }}>⭐</th>
+                                    {aiSearchInfo.used && <th style={{ width: '80px', textAlign: 'center' }}>Relevansi</th>}
                                     {showSheet && <th>Sheet</th>}
                                     {showBaris && <th>Baris</th>}
                                     {orderedDataHeaders.map(h => (
@@ -2058,7 +2481,11 @@ function App() {
                                 </thead>
                                 <tbody>
                                   {selectedFileData.matches.map(match => (
-                                    <tr key={match.id}>
+                                    <tr
+                                      key={match.id}
+                                      id={`row-cited-${match.row_number}`}
+                                      className={highlightedRowNumber && match.row_number === parseInt(highlightedRowNumber, 10) ? 'ai-cited-row-highlight' : ''}
+                                    >
                                       <td className="meta-cell text-center" style={{ width: '40px' }}>
                                         <button
                                           className={`bookmark-star-btn ${match.isBookmarked ? 'active' : ''}`}
@@ -2068,6 +2495,21 @@ function App() {
                                           {match.isBookmarked ? '★' : '☆'}
                                         </button>
                                       </td>
+                                      {aiSearchInfo.used && (
+                                        <td className="meta-cell text-center font-accent" style={{ fontWeight: 'bold' }}>
+                                          <div style={{
+                                            display: 'inline-block',
+                                            padding: '2px 8px',
+                                            borderRadius: '12px',
+                                            background: match.relevanceScore >= 80 ? 'rgba(16, 185, 129, 0.15)' : match.relevanceScore >= 50 ? 'rgba(245, 158, 11, 0.15)' : 'rgba(107, 114, 128, 0.15)',
+                                            color: match.relevanceScore >= 80 ? '#10b981' : match.relevanceScore >= 50 ? '#f59e0b' : '#9ca3af',
+                                            border: match.relevanceScore >= 80 ? '1px solid rgba(16, 185, 129, 0.25)' : match.relevanceScore >= 50 ? '1px solid rgba(245, 158, 11, 0.25)' : '1px solid rgba(107, 114, 128, 0.25)',
+                                            fontSize: '0.78rem'
+                                          }}>
+                                            {match.relevanceScore}%
+                                          </div>
+                                        </td>
+                                      )}
                                       {showSheet && (
                                         <td className="meta-cell font-accent">{match.sheetName}</td>
                                       )}
@@ -2076,9 +2518,44 @@ function App() {
                                       )}
                                       {orderedDataHeaders.map(h => {
                                         const isDesc = h === 'Kolom_17' || h === 'Kolom_18' || h.toLowerCase().includes('perihal') || h.toLowerCase().includes('uraian');
+                                        const isEditing = editingCell && editingCell.rowId === match.id && editingCell.headerKey === h;
+                                        const canEdit = user?.role === 'admin' || user?.role === 'operator';
+
                                         return (
-                                          <td key={h} className={isDesc ? 'description-cell' : ''}>
-                                            {highlightText(match.rowData[h], searchQuery)}
+                                          <td
+                                            key={h}
+                                            className={`${isDesc ? 'description-cell' : ''} ${canEdit ? 'editable-cell' : ''} ${isEditing ? 'editing-active-cell' : ''}`}
+                                            onDoubleClick={() => {
+                                              if (canEdit && !isSavingCell) {
+                                                setEditingCell({ rowId: match.id, headerKey: h });
+                                                setEditCellValue(match.rowData[h] || '');
+                                              }
+                                            }}
+                                            title={canEdit ? 'Klik 2x untuk mengedit' : ''}
+                                          >
+                                            {isEditing ? (
+                                              <div className="inline-cell-editor-container">
+                                                <input
+                                                  type="text"
+                                                  className="inline-cell-input"
+                                                  value={editCellValue}
+                                                  onChange={(e) => setEditCellValue(e.target.value)}
+                                                  onBlur={() => handleSaveCell(match.id, h, match.rowData[h], selectedFileData.matches)}
+                                                  onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                      handleSaveCell(match.id, h, match.rowData[h], selectedFileData.matches);
+                                                    } else if (e.key === 'Escape') {
+                                                      handleCancelEdit();
+                                                    }
+                                                  }}
+                                                  autoFocus
+                                                  disabled={isSavingCell}
+                                                />
+                                                {isSavingCell && <span className="inline-cell-saving-spinner">⌛</span>}
+                                              </div>
+                                            ) : (
+                                              highlightText(match.rowData[h], searchQuery)
+                                            )}
                                           </td>
                                         );
                                       })}
@@ -2090,6 +2567,14 @@ function App() {
                           </>
                         );
                       })()}
+                    </div>
+                  ) : (
+                    <div className="empty-state select-document-prompt" style={{ margin: '1.5rem auto', padding: '3.5rem 2rem', background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', textAlign: 'center' }}>
+                      <div className="empty-icon" style={{ fontSize: '3rem', marginBottom: '1rem' }}>👈</div>
+                      <h3 style={{ fontSize: '1.25rem', marginBottom: '0.5rem', color: 'var(--text-primary)' }}>Silakan Pilih Salah Satu Dokumen</h3>
+                      <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', maxWidth: '460px', margin: '0 auto', lineHeight: '1.5' }}>
+                        Klik salah satu dokumen dari daftar di sebelah kiri untuk melihat isi data baris spreadsheet.
+                      </p>
                     </div>
                   )}
                 </div>
@@ -2914,7 +3399,7 @@ function App() {
               </div>
             ) : (
               <>
-                <DragScrollContainer className="table-responsive">
+                <div className="table-responsive logs-table-container">
                   <table className="excel-table logs-table">
                     <thead>
                       <tr>
@@ -2925,6 +3410,7 @@ function App() {
                         <th>IP Address</th>
                         <th>Perangkat & OS</th>
                         <th>Browser</th>
+                        <th style={{ width: '80px', textAlign: 'center' }}>Aksi</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3031,12 +3517,21 @@ function App() {
                                 </span>
                               ) : <span className="no-data">—</span>}
                             </td>
+                            <td className="text-center" style={{ width: '80px' }}>
+                              <button
+                                onClick={() => handleCopyLog(log)}
+                                className={`btn-copy-log ${copiedLogId === log.id ? 'copied' : ''}`}
+                                title="Salin rincian log ke clipboard"
+                              >
+                                {copiedLogId === log.id ? '✓ Tersalin' : '📋 Salin'}
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
-                </DragScrollContainer>
+                </div>
 
                 {/* Pagination controls */}
                 {logTotalPages > 1 && (
@@ -3502,12 +3997,11 @@ function App() {
                 <div className="users-form-panel" style={{ marginTop: '1.5rem' }}>
                   <h3>📢 Kirim Notifikasi</h3>
                   <form onSubmit={handleBroadcastNotification} className="users-create-form">
-                    <div className="form-group" style={{ marginBottom: '1rem' }}>
+                    <div className="form-group">
                       <label>Penerima Notifikasi</label>
                       <select
                         value={broadcastRecipient}
                         onChange={(e) => setBroadcastRecipient(e.target.value)}
-                        style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: '#fff', fontSize: '0.88rem' }}
                       >
                         <option value="all">📢 Semua Akun (Global Broadcast)</option>
                         {usersList.map(u => (
@@ -3518,17 +4012,16 @@ function App() {
                       </select>
                     </div>
                     
-                    <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                    <div className="form-group">
                       <label>Pesan Notifikasi</label>
                       <textarea
                         value={broadcastMessage}
                         onChange={(e) => setBroadcastMessage(e.target.value)}
                         placeholder={broadcastRecipient === 'all' ? "Masukkan pengumuman penting untuk semua pengguna..." : "Masukkan pesan khusus untuk pengguna ini..."}
                         required
-                        style={{ width: '100%', padding: '0.65rem 0.85rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', minHeight: '80px', fontFamily: 'inherit', resize: 'vertical' }}
                       />
                     </div>
-                    <button type="submit" className="btn-submit-user" style={{ background: 'linear-gradient(135deg, var(--accent-secondary), #7c3aed)' }}>
+                    <button type="submit" className="btn-submit-user btn-broadcast">
                       {broadcastRecipient === 'all' ? 'Kirim ke Semua Akun 🚀' : 'Kirim ke Akun Dituju 🚀'}
                     </button>
                   </form>
@@ -3584,10 +4077,10 @@ function App() {
                               </button>
                               <button
                                 type="button"
-                                className="btn-view-bookmarks"
+                                className="btn-edit-user"
                                 onClick={() => startEditUser(u)}
                                 title={`Edit akun "${u.username}"`}
-                                style={{ marginRight: '8px', background: 'rgba(59, 130, 246, 0.15)', border: '1px solid rgba(59, 130, 246, 0.3)', color: '#60a5fa' }}
+                                style={{ marginRight: '8px' }}
                               >
                                 ✏️ Edit
                               </button>
@@ -3932,6 +4425,24 @@ function App() {
         </div>
       )}
 
+      {/* Deleting Progress Overlay */}
+      {deleting && (
+        <div className="delete-progress-overlay">
+          <div className="delete-progress-card">
+            <div className="delete-spinner-wrapper">
+              <div className="delete-spinner"></div>
+              <span className="delete-trash-icon">🗑️</span>
+            </div>
+            <h3>Menghapus Data</h3>
+            <p className="delete-status-text">{deleteStatusMessage}</p>
+            <div className="delete-progress-bar-container">
+              <div className="delete-progress-bar" style={{ width: `${deleteProgress}%` }}></div>
+            </div>
+            <span className="delete-progress-percent">{deleteProgress}%</span>
+          </div>
+        </div>
+      )}
+
       {/* Toast Notification Container */}
       <div className="toast-container">
         {toasts.map(toast => {
@@ -3951,6 +4462,178 @@ function App() {
           );
         })}
       </div>
+      {/* AI Chatbot Floating Button & Drawer */}
+      <button
+        type="button"
+        className="floating-chat-toggle"
+        onClick={() => setIsChatOpen(!isChatOpen)}
+        title="Buka AI Document Chatbot"
+      >
+        <span className="chat-toggle-icon">🤖</span>
+        <span className="chat-toggle-text">Chat AI</span>
+      </button>
+
+      {isChatOpen && (
+        <div className="chat-drawer-container glass-panel">
+          <div className="chat-drawer-header">
+            <div className="chat-header-title">
+              <span className="chat-ai-avatar">🤖</span>
+              <div>
+                <h4>SpreadSheet AI Assistant</h4>
+                <p className="chat-status-text">
+                  <span className="online-indicator"></span> Siap Menjawab Pertanyaan
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="chat-close-btn"
+              onClick={() => setIsChatOpen(false)}
+              title="Tutup Chat"
+            >
+              ✕
+            </button>
+          </div>
+
+          {/* Document Scope & AI Engine Selector Bar */}
+          <div className="chat-scope-bar" style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ flex: '1 1 180px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="chat-scope-label" style={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>🎯 Dokumen:</span>
+              <select
+                className="chat-scope-select"
+                style={{ flex: 1, padding: '0.35rem 0.6rem', fontSize: '0.78rem' }}
+                value={chatSelectedFileId}
+                onChange={(e) => setChatSelectedFileId(e.target.value)}
+                title="Pilih apakah AI mencari di semua dokumen atau 1 dokumen spesifik"
+              >
+                <option value="all">🌐 Semua Dokumen ({(filesList || []).length} File)</option>
+                {(filesList || []).map(f => (
+                  <option key={f.id} value={f.id}>
+                    📄 {f.filename}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div style={{ flex: '1 1 150px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span className="chat-scope-label" style={{ fontSize: '0.78rem', whiteSpace: 'nowrap' }}>🤖 Mesin AI:</span>
+              <select
+                className="chat-scope-select"
+                style={{ flex: 1, padding: '0.35rem 0.6rem', fontSize: '0.78rem' }}
+                value={chatModelMode}
+                onChange={(e) => setChatModelMode(e.target.value)}
+                title="Pilih mesin AI yang digunakan untuk menjawab"
+              >
+                <option value="auto">🤖 Otomatis (Prioritas Gemini)</option>
+                <option value="gemini">✨ Google Gemini AI (Cloud)</option>
+                <option value="local">⚡ Local AI (Offline / Cepat)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="chat-messages-list">
+            {chatMessages.map(msg => (
+              <div key={msg.id} className={`chat-message-item ${msg.sender === 'user' ? 'user-msg' : 'ai-msg'}`}>
+                <div className="chat-bubble">
+                  {msg.sender === 'ai' && (
+                    <div className="chat-bubble-badge">
+                      {msg.methodUsed === 'gemini' ? '✨ Gemini AI' : '⚡ Local AI'}
+                    </div>
+                  )}
+                  <div className="chat-bubble-text">
+                    {msg.text.split('\n').map((line, idx) => (
+                      <p key={idx}>{line}</p>
+                    ))}
+                  </div>
+
+                  {msg.sources && msg.sources.length > 0 && (
+                    <div className="chat-sources-container">
+                      <span className="sources-label">📄 Referensi Berkas:</span>
+                      <div className="sources-chips">
+                        {msg.sources.map(src => (
+                          <button
+                            key={src.fileId}
+                            type="button"
+                            className="source-chip"
+                            onClick={() => handleSourceClick(src.fileId, src.filename, src.rowNumber, msg.userQuery, src.sheetName)}
+                            title={`Klik untuk melihat berkas di tabel${src.sheetName ? ' · Sheet: ' + src.sheetName : ''}`}
+                          >
+                            🔍 {src.filename} (#{src.rowNumber}{src.sheetName && src.sheetName !== 'Sheet1' ? ` · ${src.sheetName}` : ''})
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="chat-bubble-footer" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                    <span className="chat-bubble-time">{msg.timestamp}</span>
+                    {msg.sender === 'ai' && (
+                      <button
+                        type="button"
+                        className="chat-copy-btn"
+                        onClick={() => {
+                          navigator.clipboard.writeText(msg.text);
+                          showToast('Tersalin!', 'Jawaban AI berhasil disalin ke clipboard.', 'success');
+                        }}
+                        title="Salin jawaban AI"
+                        style={{ background: 'transparent', border: 'none', color: 'var(--accent-primary)', fontSize: '0.72rem', cursor: 'pointer', opacity: 0.85 }}
+                      >
+                        📋 Salin Jawaban
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            {isChatLoading && (
+              <div className="chat-message-item ai-msg">
+                <div className="chat-bubble thinking-bubble">
+                  <span className="chat-ai-avatar">🤖</span>
+                  <div className="typing-dots">
+                    <span>.</span><span>.</span><span>.</span>
+                  </div>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Mencari data & menganalisis...</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Quick Suggestion Chips */}
+          <div className="chat-suggestions-bar">
+            <span className="suggestions-title">💡 Rekomendasi Pertanyaan:</span>
+            <div className="suggestions-scroll">
+              <button type="button" className="suggestion-chip" onClick={() => handleSendChatMessage('Berapa total dokumen tahun 2025?')}>
+                📊 Dokumen Tahun 2025
+              </button>
+              <button type="button" className="suggestion-chip" onClick={() => handleSendChatMessage('Tampilkan data divisi umum')}>
+                🏛️ Divisi Umum
+              </button>
+              <button type="button" className="suggestion-chip" onClick={() => handleSendChatMessage('Rangkum berkas P011')}>
+                📑 Berkas P011
+              </button>
+            </div>
+          </div>
+
+          <form className="chat-input-form" onSubmit={(e) => { e.preventDefault(); handleSendChatMessage(); }}>
+            <input
+              type="text"
+              className="chat-input-field"
+              placeholder="Ketik pertanyaan tentang dokumen Excel..."
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              disabled={isChatLoading}
+            />
+            <button
+              type="submit"
+              className="chat-send-btn"
+              disabled={!chatInput.trim() || isChatLoading}
+            >
+              🚀
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
@@ -4138,29 +4821,6 @@ function DragScrollContainer({ children, className }) {
 
   return (
     <div className="drag-scroll-wrapper" style={{ position: 'relative', width: '100%' }}>
-      {/* Left Scroll Button */}
-      {canScrollLeft && (
-        <button
-          type="button"
-          className="table-scroll-btn scroll-left"
-          onClick={() => scrollByAmount(-300)}
-          title="Geser Kiri"
-        >
-          ◀
-        </button>
-      )}
-
-      {/* Right Scroll Button */}
-      {canScrollRight && (
-        <button
-          type="button"
-          className="table-scroll-btn scroll-right"
-          onClick={() => scrollByAmount(300)}
-          title="Geser Kanan"
-        >
-          ▶
-        </button>
-      )}
 
       <div
         ref={containerRef}

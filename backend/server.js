@@ -173,12 +173,14 @@ const initDatabase = async () => {
       CREATE INDEX IF NOT EXISTS idx_document_rows_file_sheet_row ON document_rows (file_id, sheet_name, row_number);
     `);
 
-    // Enable pg_trgm extension and create GIN Trigram Index
+    // Enable pg_trgm extension and create GIN & B-Tree performance indexes
     try {
       await client.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm;`);
       await client.query(`
         CREATE INDEX IF NOT EXISTS idx_document_rows_trgm 
         ON document_rows USING gin ((row_data::text) gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_document_rows_file_id ON document_rows (file_id);
+        CREATE INDEX IF NOT EXISTS idx_document_rows_file_row ON document_rows (file_id, row_number);
       `);
     } catch (trgmErr) {
       console.warn('Gagal mengaktifkan pg_trgm saat startup:', trgmErr.message);
@@ -363,6 +365,191 @@ const initDatabase = async () => {
 
 // Call DB Init
 initDatabase();
+
+// Cosine Similarity helper for Vector embeddings
+const cosineSimilarity = (vecA, vecB) => {
+  let dotProduct = 0.0;
+  let normA = 0.0;
+  let normB = 0.0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  if (normA === 0 || normB === 0) return 0.0;
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+};
+
+// Fetch embeddings in batches from Google Gemini API
+const getGeminiEmbeddings = async (texts) => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY tidak dikonfigurasi di environment variable.');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:batchEmbedContents?key=${apiKey}`;
+  const requests = texts.map(text => ({
+    model: 'models/gemini-embedding-2',
+    content: { parts: [{ text }] }
+  }));
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requests })
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.error?.message || 'Gemini API Error');
+  }
+
+  const data = await res.json();
+  return data.embeddings.map(e => e.values);
+};
+
+// Chunk helper to fetch embeddings in batches safe from rate-limits/payload size
+const getGeminiEmbeddingsInChunks = async (texts) => {
+  const chunkSize = 80; // safe chunk size
+  const embeddings = [];
+  
+  for (let i = 0; i < texts.length; i += chunkSize) {
+    const chunk = texts.slice(i, i + chunkSize);
+    const chunkEmbeddings = await getGeminiEmbeddings(chunk);
+    embeddings.push(...chunkEmbeddings);
+  }
+  return embeddings;
+};
+
+// Compute Semantic Similarity Scores using Gemini API Embeddings
+const computeGeminiSemanticScores = async (query, rows) => {
+  const rowTexts = rows.map(r => {
+    // Format JSON row_data as a clean string representation for AI embeddings
+    return Object.entries(r.row_data)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join(' | ');
+  });
+
+  const allTexts = [query, ...rowTexts];
+  const allEmbeddings = await getGeminiEmbeddingsInChunks(allTexts);
+
+  const queryVector = allEmbeddings[0];
+  const docVectors = allEmbeddings.slice(1);
+
+  return rows.map((row, index) => {
+    const similarity = cosineSimilarity(queryVector, docVectors[index]);
+    // Normalise similarity (usually 0 to 1 for semantic match) to 0-100 integer range
+    const score = Math.max(0, Math.min(100, Math.round(similarity * 100)));
+    return {
+      ...row,
+      relevance_score: score
+    };
+  });
+};
+
+// Local TF-IDF Vector Space Model (Zero dependencies, 100% free fallback semantic match)
+const computeLocalSemanticScores = (query, rows) => {
+  const tokenize = (text) => {
+    return text.toLowerCase()
+      .replace(/[^\w\s\.]/g, ' ')
+      .split(/[\s\.]+/)
+      .filter(t => t.length > 1);
+  };
+
+  const queryTokens = tokenize(query);
+  const docTokensList = docTokensListGetter(rows);
+
+  const getTF = (tokens) => {
+    const tf = {};
+    tokens.forEach(t => {
+      tf[t] = (tf[t] || 0) + 1;
+    });
+    const len = tokens.length || 1;
+    Object.keys(tf).forEach(t => {
+      tf[t] = tf[t] / len;
+    });
+    return tf;
+  };
+
+  const queryTF = getTF(queryTokens);
+  const docTFs = docTokensList.map(tokens => getTF(tokens));
+
+  const allTokens = new Set([...queryTokens, ...docTokensList.flat()]);
+  const idf = {};
+  const N = rows.length;
+
+  allTokens.forEach(token => {
+    let docCount = 0;
+    docTokensList.forEach(tokens => {
+      if (tokens.includes(token)) docCount++;
+    });
+    idf[token] = Math.log((N + 1) / (docCount + 1)) + 1;
+  });
+
+  const getVector = (tf) => {
+    const vec = {};
+    allTokens.forEach(token => {
+      vec[token] = (tf[token] || 0) * (idf[token] || 0);
+    });
+    return vec;
+  };
+
+  const queryVec = getVector(queryTF);
+  const docVecs = docTFs.map(tf => getVector(tf));
+
+  const getCosine = (vecA, vecB) => {
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    allTokens.forEach(token => {
+      dot += vecA[token] * vecB[token];
+      normA += vecA[token] * vecA[token];
+      normB += vecB[token] * vecB[token];
+    });
+    if (normA === 0 || normB === 0) return 0;
+    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  };
+
+  return rows.map((row, index) => {
+    const similarity = getCosine(queryVec, docVecs[index]);
+    
+    // Contiguous substring match boost (e.g. n-gram and substring checks)
+    let boost = 0;
+    const rowText = Object.entries(row.row_data)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(' ').toLowerCase();
+    
+    if (rowText.includes(query.toLowerCase())) {
+      boost = 0.35; // substantial boost for exact contiguous query match
+    } else {
+      let matchCount = 0;
+      queryTokens.forEach(t => {
+        if (rowText.includes(t)) matchCount++;
+      });
+      boost = (matchCount / (queryTokens.length || 1)) * 0.15;
+    }
+
+    const finalScore = Math.max(0, Math.min(100, Math.round((similarity + boost) * 100)));
+    return {
+      ...row,
+      relevance_score: finalScore
+    };
+  });
+};
+
+// Helper getter to keep docTokensList clean
+const docTokensListGetter = (rows) => {
+  const tokenize = (text) => {
+    return text.toLowerCase()
+      .replace(/[^\w\s\.]/g, ' ')
+      .split(/[\s\.]+/)
+      .filter(t => t.length > 1);
+  };
+  return rows.map(r => {
+    const rowText = Object.entries(r.row_data)
+      .map(([k, v]) => `${k} ${v}`)
+      .join(' ');
+    return tokenize(rowText);
+  });
+};
 
 // Function to log activities to database (with optional user + device info)
 const logActivity = async (type, details, deviceInfo = null, userInfo = null) => {
@@ -975,24 +1162,59 @@ app.get('/api/upload/status/:jobId', authenticateToken, requireRole(['admin', 'o
 
 // 4. Search document rows by search query
 app.get('/api/search', authenticateToken, async (req, res) => {
+  const searchStartTime = performance.now();
   const queryText = req.query.q;
   const fileId = req.query.fileId;
   const filterSheet = req.query.sheet; // Optional sheet filter
   const filterUnit = req.query.unit;   // Optional unit filter
   const uploaderId = req.query.uploaderId; // Optional uploader ID filter
+  const useAI = req.query.ai === 'true'; // Checked in Filter Lanjutan
 
   if ((!queryText || queryText.trim() === '') && !fileId) {
-    return res.json({ results: [] });
+    return res.json({ results: [], totalMatchesCount: 0, executionTimeMs: 0 });
   }
 
   try {
-    let searchQuery;
-    let queryParams;
+    let searchRows = [];
+    let isAISearchUsed = false;
+    let aiMethodUsed = 'none';
 
     if (fileId) {
-      // Fetch all rows for a specific file (incorporating optional filters and bookmarks status)
+      // Fetch all rows for a specific file (incorporating optional queryText filtering, targetRow, and bookmarks status)
       let filterClauses = ['r.file_id = $1'];
-      queryParams = [parseInt(fileId)];
+      const queryParams = [parseInt(fileId)];
+      const targetRow = req.query.rowNumber ? parseInt(req.query.rowNumber) : null;
+      const targetSheet = req.query.sheetName ? req.query.sheetName.trim() : null;
+
+      if (targetRow) {
+        const minRow = Math.max(1, targetRow - 40);
+        const maxRow = targetRow + 40;
+        filterClauses.push(`(r.row_number BETWEEN ${minRow} AND ${maxRow})`);
+        if (targetSheet) {
+          queryParams.push(targetSheet.trim());
+          filterClauses.push(`LOWER(r.sheet_name) = LOWER($${queryParams.length})`);
+        }
+      } else if (queryText && queryText.trim() !== '') {
+        const searchTerms = queryText.trim().split(/[\s\.]+/).filter(Boolean);
+        const stopWords = new Set([
+          'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+          'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+          'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+          'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+          'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat'
+        ]);
+        const keywords = searchTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length >= 2);
+        const finalKeywords = keywords.length > 0 ? keywords : searchTerms;
+
+        if (finalKeywords.length > 0) {
+          const kwClauses = [];
+          finalKeywords.forEach(kw => {
+            queryParams.push(`%${kw}%`);
+            kwClauses.push(`r.row_data::text ILIKE $${queryParams.length}`);
+          });
+          filterClauses.push(`(${kwClauses.join(' OR ')})`);
+        }
+      }
 
       if (filterSheet && filterSheet.trim() !== '') {
         queryParams.push(filterSheet.trim());
@@ -1010,7 +1232,12 @@ app.get('/api/search', authenticateToken, async (req, res) => {
       queryParams.push(req.user.id);
       const userIdParamIndex = queryParams.length;
 
-      searchQuery = `
+      let orderByClause = 'ORDER BY r.sheet_name, r.row_number';
+      if (targetRow) {
+        orderByClause = `ORDER BY ABS(r.row_number - ${parseInt(targetRow, 10)}) ASC, r.row_number ASC`;
+      }
+
+      const searchQuery = `
         SELECT 
           r.id, 
           r.file_id, 
@@ -1024,11 +1251,220 @@ app.get('/api/search', authenticateToken, async (req, res) => {
         JOIN uploaded_files f ON r.file_id = f.id
         LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
         WHERE ${filterClauses.join(' AND ')}
-        ORDER BY r.sheet_name, r.row_number
+        ${orderByClause}
         LIMIT 250;
       `;
+      const searchRes = await pool.query(searchQuery, queryParams);
+      if (targetRow) {
+        searchRows = searchRes.rows.sort((a, b) => {
+          if (a.row_number === targetRow) return -1;
+          if (b.row_number === targetRow) return 1;
+          return Math.abs(a.row_number - targetRow) - Math.abs(b.row_number - targetRow);
+        });
+      } else {
+        searchRows = searchRes.rows.sort((a, b) => a.row_number - b.row_number);
+      }
+
+      // FALLBACK 1: If targetRow + targetSheet returned 0 rows, retry targetRow without sheet constraint!
+      if (searchRows.length === 0 && targetRow) {
+        console.log(`[Search] targetRow ${targetRow} with sheet "${targetSheet}" returned 0 rows for fileId ${fileId}. Retrying without sheet constraint...`);
+        const minRow = Math.max(1, targetRow - 40);
+        const maxRow = targetRow + 40;
+        const fbRes = await pool.query(`
+          SELECT 
+            r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, f.filename, f.uploaded_at,
+            (b.id IS NOT NULL) AS is_bookmarked
+          FROM document_rows r
+          JOIN uploaded_files f ON r.file_id = f.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $2
+          WHERE r.file_id = $1 AND (r.row_number BETWEEN ${minRow} AND ${maxRow})
+          ORDER BY ABS(r.row_number - ${targetRow}) ASC
+          LIMIT 250;
+        `, [parseInt(fileId), req.user.id]);
+        
+        if (fbRes.rows.length > 0) {
+          searchRows = fbRes.rows.sort((a, b) => {
+            if (a.row_number === targetRow) return -1;
+            if (b.row_number === targetRow) return 1;
+            return Math.abs(a.row_number - targetRow) - Math.abs(b.row_number - targetRow);
+          });
+        }
+      }
+
+      // FALLBACK 2: Hanya tampilkan baris default jika TIDAK ada kata kunci pencarian yang dimasukkan!
+      // Jika pengguna memasukkan kata kunci dan tidak ada baris yang cocok (0 baris),
+      // maka JANGAN tampilkan data berkas sembarangan/tidak relevan.
+      if (searchRows.length === 0 && (!queryText || queryText.trim() === '')) {
+        const fbRes2 = await pool.query(`
+          SELECT 
+            r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, f.filename, f.uploaded_at,
+            (b.id IS NOT NULL) AS is_bookmarked
+          FROM document_rows r
+          JOIN uploaded_files f ON r.file_id = f.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $2
+          WHERE r.file_id = $1
+          ORDER BY r.row_number ASC
+          LIMIT 250;
+        `, [parseInt(fileId), req.user.id]);
+        searchRows = fbRes2.rows;
+      }
+    } else if (useAI) {
+      // AI SEMANTIC HYBRID SEARCH
+      isAISearchUsed = true;
+      const searchTerms = queryText.trim().split(/[\s\.]+/).filter(Boolean);
+      
+      if (searchTerms.length === 0) {
+        return res.json({ results: [] });
+      }
+
+      // Filter out Indonesian & English stop words that match almost every row
+      const stopWords = new Set([
+        'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+        'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+        'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+        'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+        'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat'
+      ]);
+
+      const keywords = searchTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length > 2);
+      
+      // Fallback to all search terms if everything got filtered out
+      const finalKeywords = keywords.length > 0 ? keywords : searchTerms;
+
+      // Add filters if any
+      const filterClauses = [];
+      const filterParams = [];
+      if (filterSheet && filterSheet.trim() !== '') {
+        filterParams.push(filterSheet.trim());
+        filterClauses.push(`r.sheet_name = $${filterParams.length}`);
+      }
+      if (filterUnit && filterUnit.trim() !== '') {
+        filterParams.push(`%${filterUnit.trim()}%`);
+        filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${filterParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${filterParams.length})`);
+      }
+      if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+        filterParams.push(parseInt(uploaderId));
+        filterClauses.push(`f.uploaded_by = $${filterParams.length}`);
+      }
+
+      const filterSql = filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
+
+      // TIER 1: Try strict matching with AND first (extremely fast intersection)
+      const queryParams1 = [...filterParams];
+      const whereClauses1 = [];
+      finalKeywords.forEach((kw) => {
+        queryParams1.push(`%${kw}%`);
+        whereClauses1.push(`r.row_data::text ILIKE $${queryParams1.length}`);
+      });
+      
+      queryParams1.push(req.user.id);
+      const userIdParamIndex1 = queryParams1.length;
+
+      const strictQuery = `
+        SELECT id, file_id, sheet_name, row_number, row_data, filename, uploaded_at, is_bookmarked
+        FROM (
+          SELECT 
+            r.id, 
+            r.file_id, 
+            r.sheet_name, 
+            r.row_number, 
+            r.row_data, 
+            f.filename, 
+            f.uploaded_at,
+            (b.id IS NOT NULL) AS is_bookmarked,
+            ROW_NUMBER() OVER (
+              PARTITION BY r.file_id
+              ORDER BY r.sheet_name, r.row_number
+            ) AS rn_per_file
+          FROM document_rows r
+          JOIN uploaded_files f ON r.file_id = f.id
+          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex1}
+          WHERE (${whereClauses1.join(' AND ')}) ${filterSql}
+        ) ranked
+        WHERE rn_per_file <= 30
+        ORDER BY uploaded_at DESC, file_id, sheet_name, row_number
+        LIMIT 300;
+      `;
+
+      let candidates = [];
+      console.log(`[Search AI] Executing Tier 1 Strict AND query for: [${finalKeywords.join(', ')}]`);
+      const strictRes = await pool.query(strictQuery, queryParams1);
+      candidates = strictRes.rows;
+
+      // TIER 2: Fallback to looser OR matching if strict matching returned very few results
+      if (candidates.length < 5 && finalKeywords.length > 1) {
+        console.log(`[Search AI] Tier 1 Strict query returned only ${candidates.length} rows. Falling back to Tier 2 Loose OR query.`);
+        const queryParams2 = [...filterParams];
+        const whereClauses2 = [];
+        finalKeywords.forEach((kw) => {
+          queryParams2.push(`%${kw}%`);
+          whereClauses2.push(`r.row_data::text ILIKE $${queryParams2.length}`);
+        });
+
+        queryParams2.push(req.user.id);
+        const userIdParamIndex2 = queryParams2.length;
+
+        const looseQuery = `
+          SELECT id, file_id, sheet_name, row_number, row_data, filename, uploaded_at, is_bookmarked
+          FROM (
+            SELECT 
+              r.id, 
+              r.file_id, 
+              r.sheet_name, 
+              r.row_number, 
+              r.row_data, 
+              f.filename, 
+              f.uploaded_at,
+              (b.id IS NOT NULL) AS is_bookmarked,
+              ROW_NUMBER() OVER (
+                PARTITION BY r.file_id
+                ORDER BY r.sheet_name, r.row_number
+              ) AS rn_per_file
+            FROM document_rows r
+            JOIN uploaded_files f ON r.file_id = f.id
+            LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex2}
+            WHERE (${whereClauses2.join(' OR ')}) ${filterSql}
+          ) ranked
+          WHERE rn_per_file <= 30
+          ORDER BY uploaded_at DESC, file_id, sheet_name, row_number
+          LIMIT 300;
+        `;
+        const looseRes = await pool.query(looseQuery, queryParams2);
+        
+        // Merge without duplicates
+        const existingIds = new Set(candidates.map(c => c.id));
+        looseRes.rows.forEach(row => {
+          if (!existingIds.has(row.id)) {
+            candidates.push(row);
+          }
+        });
+      }
+
+      if (candidates.length > 0) {
+        try {
+          if (process.env.GEMINI_API_KEY) {
+            console.log(`[Search AI] Menggunakan Gemini Embedding API untuk: "${queryText}"`);
+            searchRows = await computeGeminiSemanticScores(queryText.trim(), candidates);
+            aiMethodUsed = 'gemini';
+          } else {
+            throw new Error('GEMINI_API_KEY tidak ditemukan, beralih ke model vektor lokal.');
+          }
+        } catch (aiErr) {
+          console.log(`[Search AI] Menggunakan Model Vektor Lokal (TF-IDF) untuk: "${queryText}". Alasan: ${aiErr.message}`);
+          searchRows = computeLocalSemanticScores(queryText.trim(), candidates);
+          aiMethodUsed = 'local';
+        }
+
+        // Sort by relevance score descending
+        searchRows.sort((a, b) => b.relevance_score - a.relevance_score);
+        
+        // Filter out low relevance if results are abundant
+        if (searchRows.length > 10) {
+          searchRows = searchRows.filter(r => r.relevance_score > 0);
+        }
+      }
     } else {
-      // Try to parse query as a standard box/pelaksana code (e.g. P011.A001.25 or P011.A.000001.2025)
+      // STANDARD SEARCH
       var codeMatch = queryText.trim().match(/^[pP](\d+)[\s\.]*([a-zA-Z])[\s\.]*(\d+)(?:[\s\.]*(\d{2,4}))?$/);
       
       if (codeMatch) {
@@ -1047,7 +1483,6 @@ app.get('/api/search', authenticateToken, async (req, res) => {
           const year2 = yearRaw.length === 4 ? yearRaw.slice(2) : yearRaw;
           years.push({ year4, year2 });
         } else {
-          // Fallback check common years
           const commonYears = ['2025', '2024', '2026', '2023', '2027', '2028', '2022', '2029', '2020', '2021'];
           commonYears.forEach(y => {
             years.push({ year4: y, year2: y.slice(2) });
@@ -1056,16 +1491,12 @@ app.get('/api/search', authenticateToken, async (req, res) => {
         
         const boxCodeVariations = new Set();
         years.forEach(({ year4, year2 }) => {
-          // Format dots & padding
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder6}.${year4}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder5}.${year4}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder3}.${year4}`);
-          
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder6}.${year2}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder5}.${year2}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}.${folder3}.${year2}`);
-          
-          // Format no-dots or 3-digit padding (like P011.A001.25)
           boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder3}.${year2}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder3}.${year4}`);
           boxCodeVariations.add(`P${unitNum}.${boxLetter}${folder5}.${year2}`);
@@ -1085,7 +1516,6 @@ app.get('/api/search', authenticateToken, async (req, res) => {
           });
         });
         
-        // Add filters if any
         let filterClauses = [];
         if (filterSheet && filterSheet.trim() !== '') {
           queryParams.push(filterSheet.trim());
@@ -1101,11 +1531,10 @@ app.get('/api/search', authenticateToken, async (req, res) => {
         }
 
         const filterSql = filterClauses.length > 0 ? ' AND ' + filterClauses.join(' AND ') : '';
-
         queryParams.push(req.user.id);
         const userIdParamIndex = queryParams.length;
 
-        searchQuery = `
+        const searchQuery = `
           SELECT 
             r.id,
             r.file_id, 
@@ -1123,19 +1552,103 @@ app.get('/api/search', authenticateToken, async (req, res) => {
           ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
           LIMIT 150;
         `;
+        const searchRes = await pool.query(searchQuery, queryParams);
+        searchRows = searchRes.rows;
+
+        // FALLBACK: If fast JSONB containment search returned 0 rows
+        if (searchRes.rowCount === 0) {
+          console.log(`[Search] Fast JSONB containment returned 0 rows for "${queryText}". Executing fallback ILIKE query...`);
+          const unitNum = codeMatch[1];
+          const boxLetter = codeMatch[2];
+          const folderNum = parseInt(codeMatch[3], 10);
+          const yearRaw = codeMatch[4];
+          const folder6 = String(folderNum).padStart(6, '0');
+          const folder5 = String(folderNum).padStart(5, '0');
+          
+          let yearPart = '';
+          if (yearRaw) {
+            const year = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
+            yearPart = '.' + year;
+          } else {
+            yearPart = '%';
+          }
+          
+          const pattern1 = `%P${unitNum}.${boxLetter}.${folder6}${yearPart}%`;
+          const pattern2_part1 = `%P${unitNum}%`;
+          const pattern2_part2 = `%${boxLetter}${folder5}${yearPart}%`;
+          
+          const fallbackParams = [pattern1, pattern2_part1, pattern2_part2];
+          
+          let fallbackFilterClauses = [];
+          if (filterSheet && filterSheet.trim() !== '') {
+            fallbackParams.push(filterSheet.trim());
+            fallbackFilterClauses.push(`r.sheet_name = $${fallbackParams.length}`);
+          }
+          if (filterUnit && filterUnit.trim() !== '') {
+            fallbackParams.push(`%${filterUnit.trim()}%`);
+            fallbackFilterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${fallbackParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${fallbackParams.length})`);
+          }
+          if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
+            fallbackParams.push(parseInt(uploaderId));
+            fallbackFilterClauses.push(`f.uploaded_by = $${fallbackParams.length}`);
+          }
+
+          const fallbackFilterSql = fallbackFilterClauses.length > 0 ? ' AND ' + fallbackFilterClauses.join(' AND ') : '';
+          fallbackParams.push(req.user.id);
+          const fallbackUserIdParamIndex = fallbackParams.length;
+
+          const fallbackQuery = `
+            SELECT 
+              r.id, 
+              r.file_id, 
+              r.sheet_name, 
+              r.row_number, 
+              r.row_data, 
+              f.filename, 
+              f.uploaded_at,
+              (b.id IS NOT NULL) AS is_bookmarked,
+              (CASE 
+                WHEN r.row_data::text ILIKE $1 THEN 100 
+                WHEN r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3 THEN 50 
+                ELSE 0 
+              END) as relevance_score
+            FROM document_rows r
+            JOIN uploaded_files f ON r.file_id = f.id
+            LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${fallbackUserIdParamIndex}
+            WHERE (r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)) ${fallbackFilterSql}
+            ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
+            LIMIT 150;
+          `;
+          const fallbackRes = await pool.query(fallbackQuery, fallbackParams);
+          searchRows = fallbackRes.rows;
+        }
       } else {
-        // Search across all rows (Google-style: match all tokens split by spaces or dots in any order)
-        const searchTerms = queryText.trim().split(/[\s\.]+/).filter(Boolean);
+        // STANDARD GOOGLE-STYLE MATCH WITH RELEVANCE SCORING
+        const rawTerms = queryText.trim().split(/[\s\.]+/).filter(Boolean);
         
-        if (searchTerms.length === 0) {
+        if (rawTerms.length === 0) {
           return res.json({ results: [] });
         }
 
-        const whereClauses = [];
+        const stopWords = new Set([
+          'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+          'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+          'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+          'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+          'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat', 'berapa',
+          'apakah', 'siapa', 'bagaimana', 'apa', 'tolong', 'jelaskan', 'rangkum', 'semua',
+          'daftar', 'total', 'ada', 'berurutan', 'entry', 'entri'
+        ]);
+
+        const searchTerms = rawTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length >= 2);
+        const finalTerms = searchTerms.length > 0 ? searchTerms : rawTerms;
+
+        const termClauses = [];
         const scoreExpressions = [];
+        const andClauses = [];
         queryParams = [];
         
-        searchTerms.forEach((term) => {
+        finalTerms.forEach((term) => {
           const match = term.match(/^([a-zA-Z]+)(0*[1-9]\d*)$/);
           if (match) {
             const letters = match[1];
@@ -1146,159 +1659,159 @@ app.get('/api/search', authenticateToken, async (req, res) => {
             const idxLetters = queryParams.length - 1;
             const idxDigits = queryParams.length;
             
-            whereClauses.push(`(r.row_data::text ILIKE $${idxTerm} OR (r.row_data::text ILIKE $${idxLetters} AND r.row_data::text ILIKE $${idxDigits}))`);
-            
-            // Give extra weight if the mixed token matches contiguously
-            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 20 ELSE 0 END)`);
+            const clause = `(r.row_data::text ILIKE $${idxTerm} OR (r.row_data::text ILIKE $${idxLetters} AND r.row_data::text ILIKE $${idxDigits}))`;
+            termClauses.push(clause);
+            andClauses.push(clause);
+            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 50 ELSE 0 END)`);
+            scoreExpressions.push(`(CASE WHEN f.filename ILIKE $${idxTerm} THEN 100 ELSE 0 END)`);
           } else {
             queryParams.push(`%${term}%`);
             const idxTerm = queryParams.length;
-            whereClauses.push(`r.row_data::text ILIKE $${idxTerm}`);
-            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 10 ELSE 0 END)`);
+            const clause = `r.row_data::text ILIKE $${idxTerm}`;
+            termClauses.push(clause);
+            andClauses.push(clause);
+            scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxTerm} THEN 40 ELSE 0 END)`);
+            scoreExpressions.push(`(CASE WHEN f.filename ILIKE $${idxTerm} THEN 100 ELSE 0 END)`);
           }
         });
 
-        // Add high boost if the entire query matches contiguously
         queryParams.push(`%${queryText.trim()}%`);
         const idxFullQuery = queryParams.length;
-        scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxFullQuery} THEN 100 ELSE 0 END)`);
+        scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${idxFullQuery} THEN 300 ELSE 0 END)`);
+        scoreExpressions.push(`(CASE WHEN f.filename ILIKE $${idxFullQuery} THEN 200 ELSE 0 END)`);
 
-        // Add filters if any
+        if (andClauses.length > 1) {
+          scoreExpressions.push(`(CASE WHEN (${andClauses.join(' AND ')}) THEN 200 ELSE 0 END)`);
+        }
+
+        const filterClauses = [`(${termClauses.join(' OR ')})`];
+
         if (filterSheet && filterSheet.trim() !== '') {
           queryParams.push(filterSheet.trim());
-          whereClauses.push(`r.sheet_name = $${queryParams.length}`);
+          filterClauses.push(`r.sheet_name = $${queryParams.length}`);
         }
         if (filterUnit && filterUnit.trim() !== '') {
           queryParams.push(`%${filterUnit.trim()}%`);
-          whereClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
+          filterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${queryParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${queryParams.length})`);
         }
         if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
           queryParams.push(parseInt(uploaderId));
-          whereClauses.push(`f.uploaded_by = $${queryParams.length}`);
+          filterClauses.push(`f.uploaded_by = $${queryParams.length}`);
         }
 
         queryParams.push(req.user.id);
         const userIdParamIndex = queryParams.length;
 
-        searchQuery = `
-          SELECT 
-            r.id, 
-            r.file_id, 
-            r.sheet_name, 
-            r.row_number, 
-            r.row_data, 
-            f.filename, 
-            f.uploaded_at,
-            (b.id IS NOT NULL) AS is_bookmarked,
-            (${scoreExpressions.join(' + ')}) as relevance_score
+        const countQuery = `
+          SELECT COUNT(*) 
           FROM document_rows r
           JOIN uploaded_files f ON r.file_id = f.id
-          LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
-          WHERE ${whereClauses.join(' AND ')}
-          ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
-          LIMIT 150;
+          WHERE ${filterClauses.join(' AND ')}
         `;
+        const countRes = await pool.query(countQuery, queryParams);
+        const totalMatchesCount = parseInt(countRes.rows[0].count, 10);
+
+        const searchQuery = `
+          SELECT id, file_id, sheet_name, row_number, row_data, filename, uploaded_at, is_bookmarked, relevance_score
+          FROM (
+            SELECT 
+              r.id, 
+              r.file_id, 
+              r.sheet_name, 
+              r.row_number, 
+              r.row_data, 
+              f.filename, 
+              f.uploaded_at,
+              (b.id IS NOT NULL) AS is_bookmarked,
+              (${scoreExpressions.join(' + ')}) as relevance_score,
+              ROW_NUMBER() OVER (
+                PARTITION BY r.file_id 
+                ORDER BY (${scoreExpressions.join(' + ')}) DESC, r.sheet_name, r.row_number
+              ) AS rn_per_file
+            FROM document_rows r
+            JOIN uploaded_files f ON r.file_id = f.id
+            LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
+            WHERE ${filterClauses.join(' AND ')}
+          ) ranked
+          WHERE rn_per_file <= 30
+          ORDER BY relevance_score DESC, uploaded_at DESC, file_id, sheet_name, row_number
+          LIMIT 300;
+        `;
+        const searchRes = await pool.query(searchQuery, queryParams);
+        searchRows = searchRes.rows;
       }
     }
 
-    let searchRes = await pool.query(searchQuery, queryParams);
-    
-    // FALLBACK: If fast JSONB containment search returned 0 rows for standard box query
-    if (searchRes.rowCount === 0 && codeMatch) {
-      console.log(`[Search] Fast JSONB containment returned 0 rows for "${queryText}". Executing fallback ILIKE query...`);
-      const unitNum = codeMatch[1];
-      const boxLetter = codeMatch[2];
-      const folderNum = parseInt(codeMatch[3], 10);
-      const yearRaw = codeMatch[4];
-      const folder6 = String(folderNum).padStart(6, '0');
-      const folder5 = String(folderNum).padStart(5, '0');
-      
-      let yearPart = '';
-      if (yearRaw) {
-        const year = yearRaw.length === 2 ? '20' + yearRaw : yearRaw;
-        yearPart = '.' + year;
-      } else {
-        yearPart = '%';
-      }
-      
-      const pattern1 = `%P${unitNum}.${boxLetter}.${folder6}${yearPart}%`;
-      const pattern2_part1 = `%P${unitNum}%`;
-      const pattern2_part2 = `%${boxLetter}${folder5}${yearPart}%`;
-      
-      const fallbackParams = [pattern1, pattern2_part1, pattern2_part2];
-      
-      let fallbackFilterClauses = [];
-      if (filterSheet && filterSheet.trim() !== '') {
-        fallbackParams.push(filterSheet.trim());
-        fallbackFilterClauses.push(`r.sheet_name = $${fallbackParams.length}`);
-      }
-      if (filterUnit && filterUnit.trim() !== '') {
-        fallbackParams.push(`%${filterUnit.trim()}%`);
-        fallbackFilterClauses.push(`(r.row_data->>'KODE UNIT' ILIKE $${fallbackParams.length} OR r.row_data->>'KODE_UNIT' ILIKE $${fallbackParams.length})`);
-      }
-      if (uploaderId && uploaderId !== 'all' && req.user.role === 'admin') {
-        fallbackParams.push(parseInt(uploaderId));
-        fallbackFilterClauses.push(`f.uploaded_by = $${fallbackParams.length}`);
-      }
-
-      const fallbackFilterSql = fallbackFilterClauses.length > 0 ? ' AND ' + fallbackFilterClauses.join(' AND ') : '';
-
-      fallbackParams.push(req.user.id);
-      const fallbackUserIdParamIndex = fallbackParams.length;
-
-      const fallbackQuery = `
-        SELECT 
-          r.id, 
-          r.file_id, 
-          r.sheet_name, 
-          r.row_number, 
-          r.row_data, 
-          f.filename, 
-          f.uploaded_at,
-          (b.id IS NOT NULL) AS is_bookmarked,
-          (CASE 
-            WHEN r.row_data::text ILIKE $1 THEN 100 
-            WHEN r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3 THEN 50 
-            ELSE 0 
-          END) as relevance_score
-        FROM document_rows r
-        JOIN uploaded_files f ON r.file_id = f.id
-        LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${fallbackUserIdParamIndex}
-        WHERE (r.row_data::text ILIKE $1 OR (r.row_data::text ILIKE $2 AND r.row_data::text ILIKE $3)) ${fallbackFilterSql}
-        ORDER BY relevance_score DESC, f.uploaded_at DESC, r.file_id, r.sheet_name, r.row_number
-        LIMIT 150;
-      `;
-      searchRes = await pool.query(fallbackQuery, fallbackParams);
-    }
-    
-    // Log search activity or file preview
+    // Log activity
     if (!fileId && queryText && queryText.trim() !== '') {
-      logActivity('search', `Mencari kata kunci: "${queryText.trim()}" (Menghasilkan ${searchRes.rows.length} baris data)`, getDeviceInfo(req), req.user);
+      const modeText = isAISearchUsed ? `AI (Method: ${aiMethodUsed})` : 'Standar';
+      logActivity('search', `Mencari kata kunci [Mode: ${modeText}]: "${queryText.trim()}" (Menghasilkan ${searchRows.length} baris data)`, getDeviceInfo(req), req.user);
     } else if (fileId) {
-      const filename = searchRes.rows[0] ? searchRes.rows[0].filename : `ID #${fileId}`;
+      const filename = searchRows[0] ? searchRows[0].filename : `ID #${fileId}`;
       logActivity('view_file', `Membuka/melihat berkas: "${filename}"`, getDeviceInfo(req), req.user);
     }
-    
-    const groupedResults = {};
-    searchRes.rows.forEach(row => {
-      if (!groupedResults[row.file_id]) {
-        groupedResults[row.file_id] = {
-          fileId: row.file_id,
+
+    // Group results by file_id and sort by relevance score DESC (most relevant file & row first)
+    const fileMap = new Map();
+    searchRows.forEach(row => {
+      const fid = row.file_id;
+      const score = parseInt(row.relevance_score, 10) || 0;
+      if (!fileMap.has(fid)) {
+        fileMap.set(fid, {
+          fileId: fid,
           filename: row.filename,
           uploadedAt: row.uploaded_at,
+          maxScore: score,
           matches: []
-        };
+        });
+      } else {
+        const fileObj = fileMap.get(fid);
+        if (score > fileObj.maxScore) {
+          fileObj.maxScore = score;
+        }
       }
-      groupedResults[row.file_id].matches.push({
+      fileMap.get(fid).matches.push({
         id: row.id,
         sheetName: row.sheet_name,
         rowNumber: row.row_number,
         rowData: row.row_data,
-        isBookmarked: !!row.is_bookmarked
+        isBookmarked: !!row.is_bookmarked,
+        relevanceScore: score || 100
       });
     });
 
-    res.json({ results: Object.values(groupedResults) });
+    // 1. Sort files array by maxScore DESC (most relevant file first), then uploadedAt DESC
+    const sortedFiles = Array.from(fileMap.values()).sort((a, b) => {
+      if (b.maxScore !== a.maxScore) return b.maxScore - a.maxScore;
+      return new Date(b.uploadedAt) - new Date(a.uploadedAt);
+    });
+
+    // 2. Sort matches inside each file by relevanceScore DESC (most relevant row at the top!)
+    //    If targetRowNumber parameter exists, place target row at index 0
+    const targetRow = req.query.rowNumber ? parseInt(req.query.rowNumber, 10) : null;
+    sortedFiles.forEach(file => {
+      file.matches.sort((a, b) => {
+        if (targetRow) {
+          if (a.rowNumber === targetRow) return -1;
+          if (b.rowNumber === targetRow) return 1;
+        }
+        if (b.relevanceScore !== a.relevanceScore) {
+          return b.relevanceScore - a.relevanceScore; // Best match at top!
+        }
+        return a.rowNumber - b.rowNumber;
+      });
+    });
+
+    const executionTimeMs = Math.round(performance.now() - searchStartTime);
+    const totalMatchCountCalculated = searchRows.length;
+
+    res.json({ 
+      results: sortedFiles,
+      totalMatchesCount: totalMatchCountCalculated,
+      executionTimeMs,
+      aiSearchUsed: isAISearchUsed,
+      aiMethod: aiMethodUsed
+    });
   } catch (err) {
     console.error('Error saat melakukan pencarian/pratinjau:', err);
     res.status(500).json({ error: 'Gagal mengambil data dari database: ' + err.message });
@@ -1837,6 +2350,443 @@ app.post('/api/notifications/read', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error marking notifications as read:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// 15. RAG Document AI Chatbot API (Full Document Catalog & Target File Scope)
+app.post('/api/chat', authenticateToken, async (req, res) => {
+  const { message, fileId, modelMode } = req.body;
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: 'Pesan kueri tidak boleh kosong!' });
+  }
+
+  const targetFileId = (fileId && fileId !== 'all') ? parseInt(fileId, 10) : null;
+  const queryText = message.trim();
+  const searchTerms = queryText.split(/[\s\.]+/).filter(Boolean);
+  
+  // Indonesian & English stop words
+  const stopWords = new Set([
+    'tampilkan', 'data', 'pada', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+    'adalah', 'itu', 'dengan', 'ini', 'oleh', 'seperti', 'adapun', 'atau', 
+    'sebagai', 'tentang', 'yaitu', 'ia', 'kami', 'mereka', 'saya', 'anda', 
+    'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
+    'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat', 'berapa',
+    'apakah', 'siapa', 'bagaimana', 'apa', 'tolong', 'jelaskan', 'rangkum', 'semua',
+    'daftar', 'total', 'ada'
+  ]);
+
+  const keywords = searchTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length > 2);
+  const finalKeywords = keywords.length > 0 ? keywords : searchTerms;
+
+  try {
+    // 1. Fetch metadata of ALL uploaded files in the database catalog
+    const allFilesRes = await pool.query(`
+      SELECT 
+        f.id, 
+        f.filename, 
+        f.uploaded_at, 
+        COALESCE(u.username, 'Sistem') as uploader_name,
+        COUNT(r.id) as total_rows
+      FROM uploaded_files f
+      LEFT JOIN users u ON f.uploaded_by = u.id
+      LEFT JOIN document_rows r ON r.file_id = f.id
+      GROUP BY f.id, f.filename, f.uploaded_at, u.username
+      ORDER BY f.uploaded_at DESC;
+    `);
+    const allFiles = allFilesRes.rows;
+    const activeCatalogFiles = targetFileId 
+      ? allFiles.filter(f => f.id === targetFileId)
+      : allFiles;
+
+    // 2. Retrieve candidate rows across distinct files with Fast Smart Tiered Strategy (<2s response time)
+    let candidates = [];
+    if (finalKeywords.length > 0 || targetFileId) {
+      // Sort keywords by length descending (longest = most specific)
+      const sortedKws = [...finalKeywords].sort((a, b) => b.length - a.length);
+
+      // Strategy Tier 1: Try strict AND search on top 3 most specific keywords
+      const topKws = sortedKws.slice(0, 3);
+      const queryParams1 = [];
+      const filterClauses1 = [];
+
+      topKws.forEach((kw) => {
+        queryParams1.push(`%${kw}%`);
+        filterClauses1.push(`r.row_data::text ILIKE $${queryParams1.length}`);
+      });
+
+      if (targetFileId) {
+        queryParams1.push(targetFileId);
+        filterClauses1.push(`r.file_id = $${queryParams1.length}`);
+      }
+
+      const whereSql1 = filterClauses1.length > 0 ? `WHERE ${filterClauses1.join(' AND ')}` : '';
+      const query1 = `
+        SELECT 
+          r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, f.filename, f.uploaded_at,
+          100 AS relevance_score
+        FROM document_rows r
+        JOIN uploaded_files f ON r.file_id = f.id
+        ${whereSql1}
+        ORDER BY r.row_number ASC
+        LIMIT 60;
+      `;
+
+      let res = await pool.query(query1, queryParams1);
+
+      // Strategy Tier 2: Fallback to top 2 longest keywords if Tier 1 returned 0
+      if (res.rows.length === 0 && sortedKws.length >= 2) {
+        const top2Kws = sortedKws.slice(0, 2);
+        const queryParams2 = [];
+        const filterClauses2 = [];
+
+        top2Kws.forEach((kw) => {
+          queryParams2.push(`%${kw}%`);
+          filterClauses2.push(`r.row_data::text ILIKE $${queryParams2.length}`);
+        });
+
+        if (targetFileId) {
+          queryParams2.push(targetFileId);
+          filterClauses2.push(`r.file_id = $${queryParams2.length}`);
+        }
+
+        const whereSql2 = filterClauses2.length > 0 ? `WHERE ${filterClauses2.join(' AND ')}` : '';
+        const query2 = `
+          SELECT 
+            r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, f.filename, f.uploaded_at,
+            50 AS relevance_score
+          FROM document_rows r
+          JOIN uploaded_files f ON r.file_id = f.id
+          ${whereSql2}
+          ORDER BY r.row_number ASC
+          LIMIT 60;
+        `;
+        res = await pool.query(query2, queryParams2);
+      }
+
+      // Strategy Tier 3: Fallback to single longest keyword if Tier 2 returned 0
+      if (res.rows.length === 0 && sortedKws.length >= 1) {
+        const singleKw = [sortedKws[0]];
+        const queryParams3 = [`%${singleKw[0]}%`];
+        const filterClauses3 = [`r.row_data::text ILIKE $1`];
+
+        if (targetFileId) {
+          queryParams3.push(targetFileId);
+          filterClauses3.push(`r.file_id = $2`);
+        }
+
+        const whereSql3 = `WHERE ${filterClauses3.join(' AND ')}`;
+        const query3 = `
+          SELECT 
+            r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, f.filename, f.uploaded_at,
+            20 AS relevance_score
+          FROM document_rows r
+          JOIN uploaded_files f ON r.file_id = f.id
+          ${whereSql3}
+          ORDER BY r.row_number ASC
+          LIMIT 60;
+        `;
+        res = await pool.query(query3, queryParams3);
+      }
+
+      // Apply per-file/sheet cap: max 8 rows per file+sheet combo to ensure diversity
+      const slotCounts = {};
+      const cappedCandidates = [];
+      for (const row of res.rows) {
+        const key = `${row.file_id}|${row.sheet_name}`;
+        slotCounts[key] = (slotCounts[key] || 0) + 1;
+        if (slotCounts[key] <= 8) {
+          cappedCandidates.push(row);
+        }
+        if (cappedCandidates.length >= 45) break;
+      }
+      candidates = cappedCandidates;
+      console.log(`[Chat] Fast Tiered Search Keywords: [${finalKeywords.join(', ')}] | Raw: ${res.rows.length} | Capped: ${candidates.length} | Files: ${new Set(candidates.map(c=>c.file_id)).size}`);
+    }
+
+
+    // Format sources list from candidate rows — use the BEST (highest-relevance) row per file
+    const sourcesMap = new Map();
+    candidates.forEach(c => {
+      if (!sourcesMap.has(c.file_id)) {
+        sourcesMap.set(c.file_id, {
+          fileId: c.file_id,
+          filename: c.filename,
+          sheetName: c.sheet_name,
+          rowNumber: c.row_number,
+          matchCount: 1,
+          bestScore: c.relevance_score || 0
+        });
+      } else {
+        const existing = sourcesMap.get(c.file_id);
+        existing.matchCount += 1;
+        // Update to higher-scored candidate if found
+        if ((c.relevance_score || 0) > existing.bestScore) {
+          existing.sheetName = c.sheet_name;
+          existing.rowNumber = c.row_number;
+          existing.bestScore = c.relevance_score || 0;
+        }
+      }
+    });
+
+    // If no candidate row matched (e.g. user asked general catalog question), use active catalog files
+    if (sourcesMap.size === 0 && candidates.length === 0) {
+      activeCatalogFiles.slice(0, 5).forEach(f => {
+        sourcesMap.set(f.id, {
+          fileId: f.id,
+          filename: f.filename,
+          sheetName: 'Sheet1',
+          rowNumber: 1,
+          matchCount: parseInt(f.total_rows, 10)
+        });
+      });
+    }
+
+    let sources = Array.from(sourcesMap.values()).slice(0, 5);
+
+    let answerText = '';
+    let methodUsed = 'local';
+
+    // Helper to format JSON row_data into clean, human-readable text for AI context
+    const cleanRowDataText = (rowData) => {
+      if (!rowData || typeof rowData !== 'object') return String(rowData);
+      return Object.entries(rowData)
+        .filter(([k, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+        .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+        .join(' | ');
+    };
+
+    // Attempt Gemini API call if modelMode is not explicitly 'local' and API key is present
+    const rawKeys = (modelMode !== 'local' && process.env.GEMINI_API_KEY) 
+      ? process.env.GEMINI_API_KEY.split(',').map(k => k.trim()).filter(Boolean) 
+      : [];
+    if (rawKeys.length > 0) {
+      const catalogSnippet = allFiles.map((f, idx) => {
+        return `${idx + 1}. "${f.filename}" (ID: ${f.id}, Pengunggah: ${f.uploader_name}, Total Baris: ${f.total_rows}, Tanggal: ${new Date(f.uploaded_at).toLocaleDateString('id-ID')})`;
+      }).join('\n');
+
+      const contextSnippet = candidates.map((c, idx) => {
+        return `[Sampel #${idx+1}: File "${c.filename}", Sheet "${c.sheet_name}", Baris #${c.row_number}] -> ${cleanRowDataText(c.row_data)}`;
+      }).join('\n');
+
+      const systemPrompt = `Anda adalah "Google Gemini AI Assistant", kecerdasan buatan serba bisa sekelas Google AI / ChatGPT.
+Anda dapat menjawab PERTANYAAN APA SAJA (pengetahuan umum, sains, teknologi, matematika, analisis data, pembuatan draft surat, koding, atau pertanyaan umum) sekaligus memiliki akses Penuh ke seluruh katalog arsip dokumen spreadsheet di database aplikasi ini!
+
+--- KATALOG SELURUH BERKAS DOKUMEN (${allFiles.length} File) ---
+${catalogSnippet || 'Belum ada berkas.'}
+---------------------------------------------------------
+
+--- KONTEKS BARIS DATA RELEVAN DARI DATABASE ---
+${candidates.length > 0 ? contextSnippet : 'Tidak ada sampel baris data spesifik yang relevan dengan pertanyaan ini.'}
+-----------------------------------------------
+
+Panduan Jawaban Sekalas Google Gemini:
+1. Anda BISA dan BOLEH menjawab PERTANYAAN APA SAJA yang diajukan pengguna (pengetahuan umum, fakta dunia, kalkulasi, koding, rangkuman, surat, atau bantuan umum lainnya) tanpa membatasi diri hanya pada dokumen.
+2. Jika pertanyaan pengguna berkaitan dengan dokumen spreadsheet di database, gunakan data katalog dan sampel baris di atas secara presisi. Sebutkan nama file dokumen dan sertakan rujukan tag [REF:NamaFile|BarisNumber] (contoh: [REF:ADATA CF KANPUS 20260710.xlsx|10660]).
+3. Jika pertanyaan pengguna bersifat umum (seperti pengetahuan umum, matematika, sains, koding, dsb.), jawablah secara lengkap, ramah, dan cerdas seperti Google Search / Gemini AI tanpa memaksa mengaitkannya ke dokumen.
+4. Jawablah secara ramah, cerdas, profesional, dan 100% akurat dalam Bahasa Indonesia menggunakan format Markdown yang rapi (teks tebal **, daftar berbutir, atau tabel jika relevan).`;
+
+      const historyPayload = Array.isArray(req.body.history) ? req.body.history.slice(-4) : [];
+      const contents = [
+        ...historyPayload,
+        { role: 'user', parts: [{ text: `${systemPrompt}\n\nPertanyaan Pengguna: "${queryText}"` }] }
+      ];
+
+      // Try keys sequentially with supported Google Gemini models (gemini-2.0-flash & gemini-1.5-flash)
+      for (let i = 0; i < rawKeys.length; i++) {
+        const apiKey = rawKeys[i];
+        const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+
+        for (const modelName of modelsToTry) {
+          const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+          try {
+            // 10-second strict timeout to prevent 504 / 502 / proxy timeouts
+            const geminiRes = await fetch(geminiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents }),
+              signal: AbortSignal.timeout(10000)
+            });
+
+            if (geminiRes.ok) {
+              const geminiData = await geminiRes.json();
+              const textOutput = geminiData.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (textOutput) {
+                answerText = textOutput;
+                methodUsed = 'gemini';
+                console.log(`[Chatbot AI 🤖] Berhasil merespons menggunakan Gemini Model (${modelName}) Key #${i+1}/${rawKeys.length}`);
+
+                // Extract explicit [REF:Filename|RowNumber] or natural text citations from Gemini response
+                const citedMap = new Map();
+
+                const findSheet = (fileId, rowNum) => {
+                  const match = candidates.find(c => c.file_id === fileId && c.row_number === rowNum);
+                  if (match) return match.sheet_name;
+                  const any = candidates.find(c => c.file_id === fileId);
+                  return any ? any.sheet_name : null;
+                };
+
+                // Pattern 1: [REF:Filename|RowNumber]
+                const refRegex1 = /\[REF:([^|\]]+)\|(\d+)\]/gi;
+                let m1;
+                while ((m1 = refRegex1.exec(answerText)) !== null) {
+                  const fn = m1[1].trim();
+                  const rn = parseInt(m1[2], 10);
+                  const fileObj = allFiles.find(f => f.filename.toLowerCase() === fn.toLowerCase());
+                  if (fileObj && !citedMap.has(fileObj.id)) {
+                    const sheet = findSheet(fileObj.id, rn);
+                    citedMap.set(fileObj.id, { fileId: fileObj.id, filename: fileObj.filename, sheetName: sheet || 'Sheet1', rowNumber: rn, matchCount: 1 });
+                  }
+                }
+
+                // Pattern 2: Natural Indonesian citation
+                allFiles.forEach(f => {
+                  if (!citedMap.has(f.id)) {
+                    const escFn = f.filename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const refRegex2 = new RegExp(`(?:${escFn}[^#\\n]*?baris\\s*#?\\s*(\\d+))|(?:baris\\s*#?\\s*(\\d+)[^\\n]*?${escFn})`, 'gi');
+                    let m2;
+                    while ((m2 = refRegex2.exec(answerText)) !== null) {
+                      const rn = parseInt(m2[1] || m2[2], 10);
+                      const sheet = findSheet(f.id, rn);
+                      citedMap.set(f.id, { fileId: f.id, filename: f.filename, sheetName: sheet || 'Sheet1', rowNumber: rn, matchCount: 1 });
+                    }
+                  }
+                });
+
+                answerText = answerText.replace(/\[REF:[^\]]+\]/g, '').trim();
+
+                if (citedMap.size > 0) {
+                  sources = Array.from(citedMap.values());
+                } else {
+                  sources = [];
+                }
+
+                // Break outer key loop as well
+                i = rawKeys.length;
+                break;
+              }
+            } else {
+              const errBody = await geminiRes.text();
+              console.log(`[Chatbot AI ⚠️] Gemini Model (${modelName}) Key #${i+1} status:`, geminiRes.status, errBody.substring(0, 120));
+            }
+          } catch (geminiErr) {
+            console.log(`[Chatbot AI ⚠️] Gemini Model (${modelName}) Key #${i+1} error (${geminiErr.name}):`, geminiErr.message);
+          }
+        }
+      }
+    }
+
+    // Build sources list if citedMap wasn't populated and candidates exist
+    if (sources.length === 0 && candidates.length > 0) {
+      if (targetFileId) {
+        const targetObj = allFiles.find(f => f.id === targetFileId);
+        if (targetObj) {
+          sources = [{
+            fileId: targetObj.id,
+            filename: targetObj.filename,
+            sheetName: candidates[0]?.sheet_name || 'Sheet1',
+            rowNumber: candidates[0]?.row_number || 1,
+            matchCount: parseInt(targetObj.total_rows, 10)
+          }];
+        }
+      } else {
+        const fileMap = new Map();
+        candidates.forEach(c => {
+          if (!fileMap.has(c.file_id)) {
+            fileMap.set(c.file_id, {
+              fileId: c.file_id,
+              filename: c.filename,
+              sheetName: c.sheet_name,
+              rowNumber: c.row_number,
+              matchCount: 1
+            });
+          } else {
+            fileMap.get(c.file_id).matchCount += 1;
+          }
+        });
+        sources = Array.from(fileMap.values()).slice(0, 5);
+      }
+    }
+
+    // Fallback if Gemini fails or Key not set — generate data-driven answer from candidates
+    if (!answerText) {
+      methodUsed = 'local';
+      if (candidates.length > 0) {
+        // Helper to format row_data into readable text
+        const fmtRow = (rd) => {
+          if (!rd || typeof rd !== 'object') return String(rd || '');
+          return Object.entries(rd)
+            .filter(([k, v]) => v !== null && v !== undefined && String(v).trim() !== '')
+            .slice(0, 8)
+            .map(([k, v]) => `${k.replace(/_/g, ' ')}: **${v}**`)
+            .join(' | ');
+        };
+
+        // Build per-file grouped answer
+        const fileGroups = new Map();
+        candidates.forEach(c => {
+          if (!fileGroups.has(c.file_id)) fileGroups.set(c.file_id, []);
+          fileGroups.get(c.file_id).push(c);
+        });
+
+        const parts = [`Ditemukan **${candidates.length} baris data** yang relevan dengan kata kunci "**${queryText}**":\n`];
+        let srcIdx = 0;
+        for (const [fid, rows] of fileGroups) {
+          // Sort rows by relevance_score DESC so the best matching row is listed at the top!
+          rows.sort((a, b) => (b.relevance_score || 0) - (a.relevance_score || 0));
+          const topRow = rows[0];
+          parts.push(`\n📄 **${topRow.filename}** (Sheet: *${topRow.sheet_name}*):`);
+          rows.slice(0, 5).forEach(r => {
+            parts.push(`  - Baris #${r.row_number}: ${fmtRow(r.row_data)}`);
+          });
+          if (rows.length > 5) parts.push(`  - ...dan ${rows.length - 5} baris lainnya.`);
+          srcIdx++;
+        }
+
+        // Ensure sources align exactly with the data groups shown
+        sources = Array.from(fileGroups.entries()).slice(0, 5).map(([fid, rows]) => {
+          const best = rows.reduce((a, b) => ((b.relevance_score || 0) > (a.relevance_score || 0) ? b : a), rows[0]);
+          return {
+            fileId: best.file_id,
+            filename: best.filename,
+            sheetName: best.sheet_name,
+            rowNumber: best.row_number,
+            matchCount: rows.length
+          };
+        });
+
+        answerText = parts.join('\n');
+      } else if (allFiles.length > 0) {
+        answerText = `Saat ini terdapat **${allFiles.length} dokumen** yang terdaftar di dalam database:\n\n` +
+          allFiles.slice(0, 10).map((f, i) => `${i + 1}. **${f.filename}** (${f.total_rows} baris, oleh *${f.uploader_name}*)`).join('\n') +
+          (allFiles.length > 10 ? `\n...dan ${allFiles.length - 10} berkas lainnya.` : '');
+        // No specific source for general catalog query
+        sources = [];
+      } else {
+        answerText = `Belum ada dokumen yang diunggah. Silakan unggah berkas Excel melalui menu **Kelola File**.`;
+        sources = [];
+      }
+    }
+
+
+    // Log Chatbot activity
+    await logActivity('chat_ai', `Mengirim pertanyaan ke AI Chatbot: "${queryText.slice(0, 60)}..."`, getDeviceInfo(req), req.user);
+
+    const cleanKeywords = finalKeywords.join(' ');
+
+    // Debug: log sources being sent to frontend
+    console.log(`[Chat Debug] Query: "${queryText.slice(0, 50)}" | Candidates: ${candidates.length} | Sources (${sources.length}):`, 
+      sources.map(s => `${s.filename}|sheet=${s.sheetName}|row=${s.rowNumber}`).join(', '));
+
+    res.json({
+      answer: answerText,
+      sources,
+      methodUsed,
+      userQuery: cleanKeywords || queryText
+    });
+  } catch (err) {
+    console.error('Error handling AI chat request:', err);
+    res.status(500).json({ error: 'Gagal memproses percakapan AI: ' + err.message });
   }
 });
 
