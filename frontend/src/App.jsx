@@ -219,9 +219,37 @@ function App() {
 
   // Download progress state
   const [downloading, setDownloading] = useState(false);
+  const downloadingRef = useRef(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [downloadStatusMessage, setDownloadStatusMessage] = useState('');
   const [downloadingFileId, setDownloadingFileId] = useState(null);
+
+  // Check backend & DB status
+  const healthFailCountRef = useRef(0);
+  const checkHealth = async () => {
+    try {
+      const res = await apiFetch('/api/health');
+      const data = await res.json();
+      if (data.status === 'ok' && data.database === 'connected') {
+        healthFailCountRef.current = 0;
+        setDbConnected(true);
+      } else {
+        if (!downloadingRef.current) {
+          healthFailCountRef.current += 1;
+          if (healthFailCountRef.current >= 3) {
+            setDbConnected(false);
+          }
+        }
+      }
+    } catch (err) {
+      if (!downloadingRef.current) {
+        healthFailCountRef.current += 1;
+        if (healthFailCountRef.current >= 3) {
+          setDbConnected(false);
+        }
+      }
+    }
+  };
 
   // User Management state
   const [usersList, setUsersList] = useState([]);
@@ -395,29 +423,6 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [searchQuery, filterSheet, filterUnit, filesList]);
-
-  // Check backend & DB status
-  const healthFailCountRef = useRef(0);
-  const checkHealth = async () => {
-    try {
-      const res = await apiFetch('/api/health');
-      const data = await res.json();
-      if (data.status === 'ok' && data.database === 'connected') {
-        healthFailCountRef.current = 0;
-        setDbConnected(true);
-      } else {
-        healthFailCountRef.current += 1;
-        if (healthFailCountRef.current >= 2) {
-          setDbConnected(false);
-        }
-      }
-    } catch (err) {
-      healthFailCountRef.current += 1;
-      if (healthFailCountRef.current >= 2) {
-        setDbConnected(false);
-      }
-    }
-  };
 
   // Toast notification system
   const showToast = useCallback((title, message, type = 'info') => {
@@ -1622,6 +1627,7 @@ function App() {
   const handleDownloadFile = async (id, filename) => {
     if (downloading) return;
 
+    downloadingRef.current = true;
     setDownloading(true);
     setDownloadingFileId(id);
     setDownloadProgress(5);
@@ -1641,6 +1647,7 @@ function App() {
       clearInterval(simInterval);
 
       if (!res.ok) {
+        downloadingRef.current = false;
         setDownloading(false);
         setDownloadingFileId(null);
         let errMsg = 'Gagal mengunduh file';
@@ -1692,12 +1699,14 @@ function App() {
       window.URL.revokeObjectURL(url);
 
       setTimeout(() => {
+        downloadingRef.current = false;
         setDownloading(false);
         setDownloadingFileId(null);
         showToast('✅ Berhasil', `File "${safeFilename}" telah berhasil diunduh.`, 'success');
       }, 500);
     } catch (err) {
       clearInterval(simInterval);
+      downloadingRef.current = false;
       setDownloading(false);
       setDownloadingFileId(null);
       alert('Error saat mengunduh file: ' + err.message);

@@ -4,6 +4,7 @@ const multer = require('multer');
 const ExcelJS = require('exceljs');
 const xlsx = require('xlsx');
 const { Pool } = require('pg');
+const { Worker } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const { UAParser } = require('ua-parser-js');
@@ -1980,6 +1981,39 @@ app.post('/api/files/bulk-delete', authenticateToken, requireRole(['admin']), as
   }
 });
 
+// Helper: Worker thread for CPU-heavy Excel file generation without blocking event loop
+function generateExcelWorker(sheetsMap) {
+  return new Promise((resolve, reject) => {
+    const workerScript = `
+      const { parentPort, workerData } = require('worker_threads');
+      const xlsx = require('xlsx');
+
+      try {
+        const wb = xlsx.utils.book_new();
+        for (const sheetName of Object.keys(workerData)) {
+          const ws = xlsx.utils.json_to_sheet(workerData[sheetName]);
+          xlsx.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
+        }
+        const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        parentPort.postMessage({ success: true, buffer });
+      } catch (err) {
+        parentPort.postMessage({ success: false, error: err.message });
+      }
+    `;
+
+    const worker = new Worker(workerScript, { eval: true, workerData: sheetsMap });
+    worker.on('message', (msg) => {
+      if (msg.success) resolve(Buffer.from(msg.buffer));
+      else reject(new Error(msg.error));
+      worker.terminate();
+    });
+    worker.on('error', (err) => {
+      reject(err);
+      worker.terminate();
+    });
+  });
+}
+
 // 6c. Download uploaded file reconstructed from database
 app.get('/api/files/:id/download', authenticateToken, async (req, res) => {
   const fileId = req.params.id;
@@ -2009,16 +2043,8 @@ app.get('/api/files/:id/download', authenticateToken, async (req, res) => {
       sheetsMap[r.sheet_name].push(r.row_data);
     }
 
-    // Yield to event loop to keep server responsive to health check pings
-    await new Promise(resolve => setImmediate(resolve));
-
-    const wb = xlsx.utils.book_new();
-    for (const sheetName of Object.keys(sheetsMap)) {
-      const ws = xlsx.utils.json_to_sheet(sheetsMap[sheetName]);
-      xlsx.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
-    }
-
-    const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    // Generate Excel file in background Worker Thread so main thread never blocks
+    const buffer = await generateExcelWorker(sheetsMap);
 
     const safeFilename = filename.endsWith('.xlsx') || filename.endsWith('.xls') ? filename : `${filename}.xlsx`;
 
