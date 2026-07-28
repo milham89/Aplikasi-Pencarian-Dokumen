@@ -2009,6 +2009,9 @@ app.get('/api/files/:id/download', authenticateToken, async (req, res) => {
       sheetsMap[r.sheet_name].push(r.row_data);
     }
 
+    // Yield to event loop to keep server responsive to health check pings
+    await new Promise(resolve => setImmediate(resolve));
+
     const wb = xlsx.utils.book_new();
     for (const sheetName of Object.keys(sheetsMap)) {
       const ws = xlsx.utils.json_to_sheet(sheetsMap[sheetName]);
@@ -2023,12 +2026,17 @@ app.get('/api/files/:id/download', authenticateToken, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(safeFilename)}"`);
     res.setHeader('Content-Length', buffer.length);
 
-    await logActivity('download', `Mengunduh berkas Excel "${filename}".`, getDeviceInfo(req), req.user);
+    res.send(buffer);
 
-    return res.send(buffer);
+    // Asynchronous non-blocking activity logging
+    logActivity('download', `Mengunduh berkas Excel "${filename}".`, getDeviceInfo(req), req.user).catch(err => {
+      console.error('Error logging download activity:', err);
+    });
   } catch (err) {
     console.error('Error saat mengunduh file:', err);
-    return res.status(500).json({ error: 'Gagal mengunduh file: ' + err.message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Gagal mengunduh file: ' + err.message });
+    }
   }
 });
 

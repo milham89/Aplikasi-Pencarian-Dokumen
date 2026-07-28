@@ -397,13 +397,25 @@ function App() {
   }, [searchQuery, filterSheet, filterUnit, filesList]);
 
   // Check backend & DB status
+  const healthFailCountRef = useRef(0);
   const checkHealth = async () => {
     try {
       const res = await apiFetch('/api/health');
       const data = await res.json();
-      setDbConnected(data.status === 'ok' && data.database === 'connected');
+      if (data.status === 'ok' && data.database === 'connected') {
+        healthFailCountRef.current = 0;
+        setDbConnected(true);
+      } else {
+        healthFailCountRef.current += 1;
+        if (healthFailCountRef.current >= 2) {
+          setDbConnected(false);
+        }
+      }
     } catch (err) {
-      setDbConnected(false);
+      healthFailCountRef.current += 1;
+      if (healthFailCountRef.current >= 2) {
+        setDbConnected(false);
+      }
     }
   };
 
