@@ -217,6 +217,12 @@ function App() {
   const [deleteProgress, setDeleteProgress] = useState(0);
   const [deleteStatusMessage, setDeleteStatusMessage] = useState('');
 
+  // Downloading state
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStatusMessage, setDownloadStatusMessage] = useState('');
+  const [downloadingFileId, setDownloadingFileId] = useState(null);
+
   // User Management state
   const [usersList, setUsersList] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
@@ -1600,13 +1606,32 @@ function App() {
     }
   };
 
-  // Download file
+  // Download file with progress tracking
   const handleDownloadFile = async (id, filename) => {
     try {
-      showToast('📥 Mengunduh', `Mengekspor file "${filename}"...`, 'info');
+      setDownloading(true);
+      setDownloadingFileId(id);
+      setDownloadProgress(10);
+      setDownloadStatusMessage(`Menyiapkan data spreadsheet "${filename}"...`);
+
+      // Smooth progress ticker while server prepares the Excel file
+      let currentProgress = 10;
+      const progressTimer = setInterval(() => {
+        currentProgress = Math.min(90, currentProgress + Math.floor(Math.random() * 8) + 4);
+        setDownloadProgress(currentProgress);
+        if (currentProgress > 30 && currentProgress < 70) {
+          setDownloadStatusMessage(`Mengekspor struktur sheet & data baris (${currentProgress}%)...`);
+        } else if (currentProgress >= 70) {
+          setDownloadStatusMessage(`Menyusun format file Excel .xlsx (${currentProgress}%)...`);
+        }
+      }, 200);
+
       const res = await apiFetch(`/api/files/${id}/download`);
 
       if (!res.ok) {
+        clearInterval(progressTimer);
+        setDownloading(false);
+        setDownloadingFileId(null);
         let errMsg = 'Gagal mengunduh file';
         try {
           const errData = await res.json();
@@ -1616,7 +1641,34 @@ function App() {
         return;
       }
 
-      const blob = await res.blob();
+      const contentLength = res.headers.get('Content-Length');
+      const totalBytes = contentLength ? parseInt(contentLength, 10) : 0;
+
+      let blob;
+      if (res.body && typeof res.body.getReader === 'function' && totalBytes > 0) {
+        const reader = res.body.getReader();
+        let receivedBytes = 0;
+        const chunks = [];
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          receivedBytes += value.length;
+          const pct = Math.min(99, Math.round((receivedBytes / totalBytes) * 100));
+          clearInterval(progressTimer);
+          setDownloadProgress(pct);
+          setDownloadStatusMessage(`Mengunduh file Excel (${pct}%)...`);
+        }
+        blob = new Blob(chunks, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      } else {
+        blob = await res.blob();
+      }
+
+      clearInterval(progressTimer);
+      setDownloadProgress(100);
+      setDownloadStatusMessage('Mengekspor & menyimpan file ke perangkat...');
+
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1626,8 +1678,17 @@ function App() {
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
-      showToast('✅ Berhasil', `File "${safeFilename}" siap diunduh.`, 'success');
+
+      setTimeout(() => {
+        setDownloading(false);
+        setDownloadingFileId(null);
+        setDownloadProgress(0);
+        showToast('✅ Berhasil', `File "${safeFilename}" telah tersimpan di komputer Anda.`, 'success');
+      }, 500);
     } catch (err) {
+      setDownloading(false);
+      setDownloadingFileId(null);
+      setDownloadProgress(0);
       alert('Error saat mengunduh file: ' + err.message);
     }
   };
@@ -3329,14 +3390,15 @@ function App() {
                         <button 
                           className="download-file-btn" 
                           onClick={() => handleDownloadFile(file.id, file.filename)}
+                          disabled={downloading && downloadingFileId === file.id}
                           title="Unduh berkas Excel ini"
                           style={{
                             padding: '0.45rem 0.85rem',
                             borderRadius: '8px',
                             border: '1px solid rgba(59, 130, 246, 0.4)',
-                            background: 'rgba(59, 130, 246, 0.15)',
+                            background: downloading && downloadingFileId === file.id ? 'rgba(59, 130, 246, 0.3)' : 'rgba(59, 130, 246, 0.15)',
                             color: '#60a5fa',
-                            cursor: 'pointer',
+                            cursor: downloading && downloadingFileId === file.id ? 'wait' : 'pointer',
                             fontSize: '0.82rem',
                             fontWeight: '600',
                             transition: 'all 0.2s ease',
@@ -3345,7 +3407,7 @@ function App() {
                             gap: '4px'
                           }}
                         >
-                          📥 Unduh Excel
+                          {downloading && downloadingFileId === file.id ? `⏳ Mengunduh (${downloadProgress}%)` : '📥 Unduh Excel'}
                         </button>
                         {user.role === 'admin' && (
                           <button 
@@ -3357,6 +3419,17 @@ function App() {
                           </button>
                         )}
                       </div>
+                      {downloading && downloadingFileId === file.id && (
+                        <div className="card-download-progress" style={{ marginTop: '0.75rem', width: '100%' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem', color: '#60a5fa', marginBottom: '4px', fontWeight: '600' }}>
+                            <span>⏳ Ekspor & Download...</span>
+                            <span>{downloadProgress}%</span>
+                          </div>
+                          <div style={{ width: '100%', height: '6px', background: 'rgba(255, 255, 255, 0.1)', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${downloadProgress}%`, height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa)', borderRadius: '3px', transition: 'width 0.2s ease' }}></div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -4494,6 +4567,24 @@ function App() {
               <div className="delete-progress-bar" style={{ width: `${deleteProgress}%` }}></div>
             </div>
             <span className="delete-progress-percent">{deleteProgress}%</span>
+          </div>
+        </div>
+      )}
+
+      {/* Downloading Progress Overlay */}
+      {downloading && (
+        <div className="download-progress-overlay">
+          <div className="download-progress-card">
+            <div className="download-spinner-wrapper">
+              <div className="download-spinner"></div>
+              <span className="download-icon">📥</span>
+            </div>
+            <h3>Mengekspor & Mengunduh Excel</h3>
+            <p className="download-status-text">{downloadStatusMessage}</p>
+            <div className="download-progress-bar-container">
+              <div className="download-progress-bar" style={{ width: `${downloadProgress}%` }}></div>
+            </div>
+            <span className="download-progress-percent">{downloadProgress}%</span>
           </div>
         </div>
       )}
