@@ -1994,7 +1994,7 @@ function generateExcelWorker(sheetsMap) {
           const ws = xlsx.utils.json_to_sheet(workerData[sheetName]);
           xlsx.utils.book_append_sheet(wb, ws, sheetName.substring(0, 31));
         }
-        const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        const buffer = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx', compression: false });
         parentPort.postMessage({ success: true, buffer });
       } catch (err) {
         parentPort.postMessage({ success: false, error: err.message });
