@@ -486,6 +486,27 @@ function App() {
     }
   }, [handleLogout]);
 
+  const safeJson = useCallback(async (res) => {
+    try {
+      const text = await res.text();
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        if (res.status === 413) {
+          return { error: 'Ukuran berkas terlalu besar.' };
+        } else if (res.status === 504 || res.status === 524) {
+          return { error: 'Waktu koneksi server habis (504 Gateway Timeout).' };
+        } else if (res.status === 502 || res.status === 520) {
+          return { error: 'Server backend sedang merestart (502 Bad Gateway).' };
+        }
+        const cleanText = text.replace(/<[^>]*>?/gm, '').trim();
+        return { error: `Server error (${res.status}): ${cleanText.substring(0, 100) || res.statusText}` };
+      }
+    } catch (err) {
+      return { error: `Gagal membaca respons server: ${err.message}` };
+    }
+  }, []);
+
   const fetchUsers = useCallback(async () => {
     setLoadingUsers(true);
     try {
@@ -1774,17 +1795,7 @@ function App() {
           body: formData,
         });
 
-        let uploadData = {};
-        try {
-          uploadData = await res.json();
-        } catch (_) {
-          if (res.status === 413) {
-            throw new Error('Ukuran file terlalu besar untuk diproses secara langsung.');
-          } else {
-            throw new Error(`Gagal mengunggah file (${res.status} ${res.statusText}).`);
-          }
-        }
-
+        const uploadData = await safeJson(res);
         if (!res.ok) {
           throw new Error(uploadData.error || `Gagal mengunggah file (${res.status}).`);
         }
@@ -1814,13 +1825,9 @@ function App() {
             body: formData,
           });
 
+          const chunkData = await safeJson(chunkRes);
           if (!chunkRes.ok) {
-            let chunkErr = 'Gagal mengunggah potongan file.';
-            try {
-              const errData = await chunkRes.json();
-              chunkErr = errData.error || chunkErr;
-            } catch (_) {}
-            throw new Error(chunkErr);
+            throw new Error(chunkData.error || `Gagal mengunggah potongan file bagian ${i + 1}.`);
           }
         }
 
@@ -1838,13 +1845,7 @@ function App() {
           })
         });
 
-        let mergeData = {};
-        try {
-          mergeData = await mergeRes.json();
-        } catch (_) {
-          throw new Error(`Gagal menggabungkan berkas di server (${mergeRes.status} ${mergeRes.statusText}).`);
-        }
-
+        const mergeData = await safeJson(mergeRes);
         if (!mergeRes.ok) {
           throw new Error(mergeData.error || `Gagal menggabungkan berkas di server (${mergeRes.status}).`);
         }
@@ -1856,19 +1857,25 @@ function App() {
       setUploadStatusMessage('Berkas terunggah. Memulai impor data ke database...');
 
       // 2. Poll status endpoint until completed or failed
+      let statusFailCounter = 0;
       const pollInterval = setInterval(async () => {
         try {
           const statusRes = await apiFetch(`/api/upload/status/${jobId}`);
+          const job = await safeJson(statusRes);
+
           if (!statusRes.ok) {
-            clearInterval(pollInterval);
-            setUploading(false);
-            setUploadError('Gagal memantau status impor.');
+            statusFailCounter++;
+            if (statusFailCounter >= 5) {
+              clearInterval(pollInterval);
+              setUploading(false);
+              setUploadError(job.error || 'Gagal memantau status impor.');
+            }
             return;
           }
 
-          const job = await statusRes.json();
-          setUploadProgress(job.progress);
-          setUploadStatusMessage(job.message);
+          statusFailCounter = 0;
+          setUploadProgress(job.progress || 20);
+          setUploadStatusMessage(job.message || 'Memproses impor data...');
 
           if (job.status === 'completed') {
             clearInterval(pollInterval);
@@ -1892,9 +1899,12 @@ function App() {
             showToast('⚠️ Upload Gagal', job.error || 'Terjadi kesalahan saat memproses file.', 'error');
           }
         } catch (pollErr) {
-          clearInterval(pollInterval);
-          setUploading(false);
-          setUploadError('Terjadi kesalahan koneksi saat memantau status.');
+          statusFailCounter++;
+          if (statusFailCounter >= 5) {
+            clearInterval(pollInterval);
+            setUploading(false);
+            setUploadError('Terjadi kesalahan koneksi saat memantau status.');
+          }
         }
       }, 1000);
 
