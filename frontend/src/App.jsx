@@ -1838,9 +1838,15 @@ function App() {
           })
         });
 
-        const mergeData = await mergeRes.json();
+        let mergeData = {};
+        try {
+          mergeData = await mergeRes.json();
+        } catch (_) {
+          throw new Error(`Gagal menggabungkan berkas di server (${mergeRes.status} ${mergeRes.statusText}).`);
+        }
+
         if (!mergeRes.ok) {
-          throw new Error(mergeData.error || 'Gagal menggabungkan berkas di server.');
+          throw new Error(mergeData.error || `Gagal menggabungkan berkas di server (${mergeRes.status}).`);
         }
 
         jobId = mergeData.jobId;

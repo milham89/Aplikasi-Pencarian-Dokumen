@@ -2967,18 +2967,6 @@ Panduan Jawaban Sekalas Google Gemini:
 });
 
 // Global error handler for upload limit
-app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'Ukuran file terlalu besar! Maksimal 250MB.' });
-    }
-  }
-  if (err) {
-    return res.status(400).json({ error: err.message });
-  }
-  next();
-});
-
 // Serve static files from the React frontend build
 app.use(express.static(path.join(__dirname, '../frontend/dist')));
 
@@ -2993,6 +2981,24 @@ app.get('*', (req, res, next) => {
   } else {
     res.status(404).send('Aplikasi berjalan dalam mode API. Harap akses via port frontend (5173) atau jalankan "npm run build" pada direktori frontend.');
   }
+});
+
+// Global API 404 handler (Guarantees JSON response for all /api routes)
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ error: `Endpoint API "${req.originalUrl}" tidak ditemukan.` });
+});
+
+// Global Error Handler for API routes
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'Ukuran file terlalu besar! Maksimal 250MB.' });
+    }
+  }
+  if (req.originalUrl && req.originalUrl.startsWith('/api')) {
+    return res.status(err.status || 400).json({ error: err.message || 'Terjadi kesalahan pada server.' });
+  }
+  return res.status(500).json({ error: err.message || 'Server error' });
 });
 
 // Start Express Server
