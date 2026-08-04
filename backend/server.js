@@ -66,7 +66,8 @@ const getDeviceInfo = (req) => {
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '250mb' }));
+app.use(express.urlencoded({ limit: '250mb', extended: true }));
 app.use((req, res, next) => {
   console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   next();
@@ -629,7 +630,7 @@ async function processFileInBackground(jobId, filePath, originalname, userInfo =
       
       let headers = null;
       let rowsToInsert = [];
-      const BATCH_SIZE = 500;
+      const BATCH_SIZE = 1000;
 
       for await (const row of worksheetReader) {
         // Build values array
@@ -679,9 +680,11 @@ async function processFileInBackground(jobId, filePath, originalname, userInfo =
           totalRowsInserted += rowsToInsert.length;
           rowsToInsert = [];
 
-          // Update job status
+          // Update job status with dynamic progress calculation
           uploadJobs[jobId].processedRows = totalRowsInserted;
-          uploadJobs[jobId].message = `Mengimpor sheet "${sheetName}": ${totalRowsInserted.toLocaleString('id-ID')} baris...`;
+          const calcProgress = Math.min(95, 20 + Math.floor((totalRowsInserted / (totalRowsInserted + 8000)) * 75));
+          uploadJobs[jobId].progress = calcProgress;
+          uploadJobs[jobId].message = `Mengimpor sheet "${sheetName}": ${totalRowsInserted.toLocaleString('id-ID')} baris (${calcProgress}%)...`;
           
           // Yield to Event Loop
           await new Promise(resolve => setImmediate(resolve));
@@ -693,7 +696,9 @@ async function processFileInBackground(jobId, filePath, originalname, userInfo =
         await insertBatch(client, fileId, sheetName, rowsToInsert);
         totalRowsInserted += rowsToInsert.length;
         uploadJobs[jobId].processedRows = totalRowsInserted;
-        uploadJobs[jobId].message = `Mengimpor sheet "${sheetName}": ${totalRowsInserted.toLocaleString('id-ID')} baris...`;
+        const calcProgress = Math.min(95, 20 + Math.floor((totalRowsInserted / (totalRowsInserted + 8000)) * 75));
+        uploadJobs[jobId].progress = calcProgress;
+        uploadJobs[jobId].message = `Mengimpor sheet "${sheetName}": ${totalRowsInserted.toLocaleString('id-ID')} baris (${calcProgress}%)...`;
         await new Promise(resolve => setImmediate(resolve));
       }
     }

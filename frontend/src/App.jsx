@@ -1764,9 +1764,21 @@ function App() {
         body: formData,
       });
 
-      const uploadData = await res.json();
+      let uploadData = {};
+      try {
+        uploadData = await res.json();
+      } catch (_) {
+        if (res.status === 413) {
+          throw new Error('Ukuran file terlalu besar! Silakan periksa batas Nginx (client_max_body_size).');
+        } else if (res.status === 504) {
+          throw new Error('Waktu koneksi unggah habis (504 Gateway Timeout).');
+        } else {
+          throw new Error(`Gagal mengunggah file (${res.status} ${res.statusText}).`);
+        }
+      }
+
       if (!res.ok) {
-        throw new Error(uploadData.error || 'Gagal mengunggah file.');
+        throw new Error(uploadData.error || `Gagal mengunggah file (${res.status}).`);
       }
 
       const jobId = uploadData.jobId;
