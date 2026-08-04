@@ -100,6 +100,32 @@ const upload = multer({
   }
 });
 
+// Configure Multer for chunked uploads (bypasses Cloudflare 100MB POST limit)
+const chunkUploadDir = path.join(uploadDir, 'temp_chunks');
+if (!fs.existsSync(chunkUploadDir)) {
+  fs.mkdirSync(chunkUploadDir, { recursive: true });
+}
+
+const chunkStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadId = req.body.uploadId || 'default';
+    const targetDir = path.join(chunkUploadDir, uploadId);
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    cb(null, targetDir);
+  },
+  filename: (req, file, cb) => {
+    const chunkIndex = req.body.chunkIndex !== undefined ? req.body.chunkIndex : '0';
+    cb(null, `chunk_${chunkIndex}`);
+  }
+});
+
+const uploadChunkMulter = multer({
+  storage: chunkStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
 // PostgreSQL Database Connection Pool
 const pool = new Pool({
   user: process.env.DB_USER || 'postgres',
@@ -1156,6 +1182,64 @@ app.post('/api/upload', authenticateToken, requireRole(['admin', 'operator']), u
     message: 'File berhasil diunggah dan sedang diproses di latar belakang.',
     jobId: jobId
   });
+});
+
+// 2a. Upload Chunk (Bypasses Cloudflare 100MB POST payload limit)
+app.post('/api/upload/chunk', authenticateToken, requireRole(['admin', 'operator']), uploadChunkMulter.single('chunk'), (req, res) => {
+  const { uploadId, chunkIndex, totalChunks } = req.body;
+  if (!uploadId || chunkIndex === undefined) {
+    return res.status(400).json({ error: 'Parameter uploadId dan chunkIndex wajib diisi!' });
+  }
+  res.json({ success: true, chunkIndex: parseInt(chunkIndex), totalChunks: parseInt(totalChunks) });
+});
+
+// 2b. Merge Chunks & Trigger Background Processing
+app.post('/api/upload/merge', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { uploadId, filename, totalChunks } = req.body;
+  if (!uploadId || !filename || !totalChunks) {
+    return res.status(400).json({ error: 'Parameter uploadId, filename, dan totalChunks wajib diisi!' });
+  }
+
+  const targetDir = path.join(chunkUploadDir, uploadId);
+  if (!fs.existsSync(targetDir)) {
+    return res.status(404).json({ error: 'Potongan file tidak ditemukan.' });
+  }
+
+  const safeFilename = path.basename(filename);
+  const finalFileName = `${Date.now()}-${safeFilename}`;
+  const finalFilePath = path.join(uploadDir, finalFileName);
+
+  try {
+    const writeStream = fs.createWriteStream(finalFilePath);
+
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(targetDir, `chunk_${i}`);
+      if (!fs.existsSync(chunkPath)) {
+        throw new Error(`Potongan file bagian ${i} hilang!`);
+      }
+      const chunkBuffer = fs.readFileSync(chunkPath);
+      writeStream.write(chunkBuffer);
+      try { fs.unlinkSync(chunkPath); } catch (_) {}
+    }
+    writeStream.end();
+
+    try { fs.rmdirSync(targetDir); } catch (_) {}
+
+    const jobId = Date.now().toString();
+    console.log(`[Upload Chunked] Berkas "${filename}" (100% tergabung). Memulai Job ID: ${jobId}`);
+
+    // Trigger background process for merged file
+    processFileInBackground(jobId, finalFilePath, safeFilename, req.user);
+
+    res.json({
+      success: true,
+      message: 'File berhasil digabungkan dan sedang diproses di latar belakang.',
+      jobId: jobId
+    });
+  } catch (err) {
+    console.error('Error merging chunks:', err);
+    res.status(500).json({ error: 'Gagal menggabungkan potongan file: ' + err.message });
+  }
 });
 
 // 3. Get background upload job status

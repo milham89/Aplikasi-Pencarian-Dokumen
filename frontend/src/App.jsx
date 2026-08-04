@@ -1739,7 +1739,7 @@ function App() {
     }
   };
 
-  // Upload file logic with background job status polling
+  // Upload file logic with Chunked Upload (bypasses Cloudflare 100MB POST payload limit)
   const processFileUpload = async (file) => {
     const fileExt = file.name.split('.').pop().toLowerCase();
     if (fileExt !== 'xlsx' && fileExt !== 'xls') {
@@ -1749,41 +1749,105 @@ function App() {
     }
 
     setUploading(true);
-    setUploadProgress(10);
-    setUploadStatusMessage('Mengunggah berkas ke server...');
+    setUploadProgress(5);
+    setUploadStatusMessage('Menyiapkan berkas untuk diunggah...');
     setUploadError(null);
     setUploadSuccess(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
+    const CHUNK_SIZE = 8 * 1024 * 1024; // 8MB per chunk (well below Cloudflare 100MB limit)
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const uploadId = Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
     try {
-      // 1. Initial POST request
-      const res = await apiFetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      let jobId = null;
 
-      let uploadData = {};
-      try {
-        uploadData = await res.json();
-      } catch (_) {
-        if (res.status === 413) {
-          throw new Error('Ukuran file terlalu besar! Silakan periksa batas Nginx (client_max_body_size).');
-        } else if (res.status === 504) {
-          throw new Error('Waktu koneksi unggah habis (504 Gateway Timeout).');
-        } else {
-          throw new Error(`Gagal mengunggah file (${res.status} ${res.statusText}).`);
+      if (totalChunks <= 1) {
+        // Single direct upload for small files (<= 8MB)
+        setUploadProgress(10);
+        setUploadStatusMessage('Mengunggah berkas ke server...');
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const res = await apiFetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        let uploadData = {};
+        try {
+          uploadData = await res.json();
+        } catch (_) {
+          if (res.status === 413) {
+            throw new Error('Ukuran file terlalu besar untuk diproses secara langsung.');
+          } else {
+            throw new Error(`Gagal mengunggah file (${res.status} ${res.statusText}).`);
+          }
         }
+
+        if (!res.ok) {
+          throw new Error(uploadData.error || `Gagal mengunggah file (${res.status}).`);
+        }
+
+        jobId = uploadData.jobId;
+      } else {
+        // Chunked upload for large files (> 8MB, e.g., 155MB)
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(file.size, start + CHUNK_SIZE);
+          const chunk = file.slice(start, end);
+
+          const formData = new FormData();
+          formData.append('uploadId', uploadId);
+          formData.append('chunkIndex', i);
+          formData.append('totalChunks', totalChunks);
+          formData.append('chunk', chunk, file.name);
+
+          const pct = Math.floor(((i + 1) / totalChunks) * 20);
+          setUploadProgress(pct);
+          const mbUploaded = Math.round((end / (1024 * 1024)) * 10) / 10;
+          const mbTotal = Math.round((file.size / (1024 * 1024)) * 10) / 10;
+          setUploadStatusMessage(`Mengunggah bagian ${i + 1}/${totalChunks} (${mbUploaded} MB / ${mbTotal} MB)...`);
+
+          const chunkRes = await apiFetch('/api/upload/chunk', {
+            method: 'POST',
+            body: formData,
+          });
+
+          if (!chunkRes.ok) {
+            let chunkErr = 'Gagal mengunggah potongan file.';
+            try {
+              const errData = await chunkRes.json();
+              chunkErr = errData.error || chunkErr;
+            } catch (_) {}
+            throw new Error(chunkErr);
+          }
+        }
+
+        // Trigger merge chunks endpoint
+        setUploadProgress(20);
+        setUploadStatusMessage('Menggabungkan potongan berkas di server...');
+
+        const mergeRes = await apiFetch('/api/upload/merge', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uploadId,
+            filename: file.name,
+            totalChunks
+          })
+        });
+
+        const mergeData = await mergeRes.json();
+        if (!mergeRes.ok) {
+          throw new Error(mergeData.error || 'Gagal menggabungkan berkas di server.');
+        }
+
+        jobId = mergeData.jobId;
       }
 
-      if (!res.ok) {
-        throw new Error(uploadData.error || `Gagal mengunggah file (${res.status}).`);
-      }
-
-      const jobId = uploadData.jobId;
       setUploadProgress(20);
-      setUploadStatusMessage('Berkas terunggah. Memulai impor data...');
+      setUploadStatusMessage('Berkas terunggah. Memulai impor data ke database...');
 
       // 2. Poll status endpoint until completed or failed
       const pollInterval = setInterval(async () => {
