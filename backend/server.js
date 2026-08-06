@@ -390,11 +390,12 @@ const initDatabase = async () => {
       );
     `);
 
-    // Check if uim_records is empty and seed initial data from uim_seed_data.json if so
-    const uimCountRes = await client.query('SELECT COUNT(*)::int FROM uim_records;');
-    if (uimCountRes.rows[0].count === 0) {
-      console.log('Menyisipkan data UIM awal...');
+    // Always update/reseed uim_records to ensure exact match with latest dataset (L901 to M110)
+    const uimCheckRes = await client.query("SELECT COUNT(*)::int FROM uim_records WHERE uim_code = 'L901';");
+    if (uimCheckRes.rows[0].count === 0) {
+      console.log('Memperbarui data UIM ke format terbaru (L901 - M110)...');
       try {
+        await client.query('TRUNCATE TABLE uim_records RESTART IDENTITY;');
         const seedPath = path.join(__dirname, 'uim_seed_data.json');
         if (fs.existsSync(seedPath)) {
           const rawSeed = fs.readFileSync(seedPath, 'utf8');
@@ -405,10 +406,10 @@ const initDatabase = async () => {
               [item.uim_code || '', item.full_name || '', item.unit_kerja || '']
             );
           }
-          console.log(`Berhasil menyisipkan ${seedData.length} data UIM awal.`);
+          console.log(`Berhasil menyisipkan ${seedData.length} data UIM terbaru.`);
         }
       } catch (seedErr) {
-        console.error('Gagal menyisipkan data UIM awal:', seedErr.message);
+        console.error('Gagal menyisipkan data UIM terbaru:', seedErr.message);
       }
     }
 
