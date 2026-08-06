@@ -15,7 +15,7 @@ jspm_packages/
 .npm
 
 # Output directories
-dist/
+# dist/
 dist-ssr/
 *.local
 
