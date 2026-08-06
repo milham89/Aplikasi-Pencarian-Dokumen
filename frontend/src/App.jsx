@@ -4768,9 +4768,37 @@ function App() {
 
           {/* Pagination Controls */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
-            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-              Menampilkan {uimRecords.length > 0 ? (uimPage - 1) * uimLimit + 1 : 0} - {Math.min(uimPage * uimLimit, uimTotalRecords)} dari {uimTotalRecords.toLocaleString('id-ID')} data UIM
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                Menampilkan {uimRecords.length > 0 ? (uimPage - 1) * uimLimit + 1 : 0} - {Math.min(uimPage * uimLimit, uimTotalRecords)} dari {uimTotalRecords.toLocaleString('id-ID')} data UIM
+              </span>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Tampilkan:</label>
+                <select
+                  value={uimLimit}
+                  onChange={(e) => {
+                    const newLimit = parseInt(e.target.value);
+                    setUimLimit(newLimit);
+                    setUimPage(1);
+                  }}
+                  style={{
+                    padding: '0.35rem 0.75rem',
+                    background: 'var(--bg-tertiary)',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: '6px',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.8rem',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <option value={25}>25 baris per halaman</option>
+                  <option value={50}>50 baris per halaman</option>
+                  <option value={100}>100 baris per halaman</option>
+                  <option value={1000}>✨ Tampilkan Semua Data ({uimTotalRecords})</option>
+                </select>
+              </div>
+            </div>
 
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
               <button
