@@ -31,8 +31,23 @@ function App() {
     return saved ? JSON.parse(saved) : null;
   });
 
-  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard' | 'bookmarks' | 'users'
+  // Navigation Tabs: 'search' | 'upload' | 'files' | 'logs' | 'dashboard' | 'bookmarks' | 'users' | 'uim'
   const [activeTab, setActiveTab] = useState('search');
+
+  // UIM (User ID Manajemen) State
+  const [uimRecords, setUimRecords] = useState([]);
+  const [uimTotalRecords, setUimTotalRecords] = useState(0);
+  const [uimPage, setUimPage] = useState(1);
+  const [uimLimit, setUimLimit] = useState(25);
+  const [uimTotalPages, setUimTotalPages] = useState(1);
+  const [uimUnits, setUimUnits] = useState([]);
+  const [uimSearch, setUimSearch] = useState('');
+  const [uimUnitFilter, setUimUnitFilter] = useState('ALL');
+  const [uimLoading, setUimLoading] = useState(false);
+  const [showUimModal, setShowUimModal] = useState(false);
+  const [editingUim, setEditingUim] = useState(null);
+  const [uimFormData, setUimFormData] = useState({ uim_code: '', full_name: '', unit_kerja: '' });
+  const [uimSaving, setUimSaving] = useState(false);
   
   // Dark/Light Theme
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -378,6 +393,23 @@ function App() {
     }
   }, [activeTab, selectedUserFilterForBookmarks, selectedBookmarkUserIds]);
 
+  // Fetch UIM records when UIM tab is active
+  useEffect(() => {
+    if (activeTab === 'uim') {
+      fetchUimRecords(uimSearch, uimPage, uimLimit, uimUnitFilter);
+    }
+  }, [activeTab, uimPage, uimLimit, uimUnitFilter]);
+
+  // Debounced UIM search
+  useEffect(() => {
+    if (activeTab !== 'uim') return;
+    const timer = setTimeout(() => {
+      setUimPage(1);
+      fetchUimRecords(uimSearch, 1, uimLimit, uimUnitFilter);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [uimSearch]);
+
   // Debounced search trigger / Auto preview trigger (re-runs when searchQuery, filterSheet, or filterUnit changes)
   useEffect(() => {
     // Sync URL with search query
@@ -506,6 +538,91 @@ function App() {
       return { error: `Gagal membaca respons server: ${err.message}` };
     }
   }, []);
+
+  const fetchUimRecords = useCallback(async (search = uimSearch, page = uimPage, limit = uimLimit, unit = uimUnitFilter) => {
+    setUimLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page,
+        limit,
+        search: search.trim(),
+        unit: unit !== 'ALL' ? unit : ''
+      });
+      const res = await apiFetch(`/api/uim?${params.toString()}`);
+      if (res.ok) {
+        const data = await safeJson(res);
+        setUimRecords(data.records || []);
+        setUimTotalRecords(data.total || 0);
+        setUimPage(data.page || 1);
+        setUimTotalPages(data.totalPages || 1);
+        if (data.units) setUimUnits(data.units);
+      }
+    } catch (err) {
+      console.error('Error fetching UIM records:', err);
+    } finally {
+      setUimLoading(false);
+    }
+  }, [uimSearch, uimPage, uimLimit, uimUnitFilter, apiFetch, safeJson]);
+
+  const handleOpenAddUim = () => {
+    setEditingUim(null);
+    setUimFormData({ uim_code: '', full_name: '', unit_kerja: '' });
+    setShowUimModal(true);
+  };
+
+  const handleOpenEditUim = (record) => {
+    setEditingUim(record);
+    setUimFormData({ uim_code: record.uim_code, full_name: record.full_name, unit_kerja: record.unit_kerja });
+    setShowUimModal(true);
+  };
+
+  const handleSaveUim = async (e) => {
+    e.preventDefault();
+    if (!uimFormData.uim_code.trim() || !uimFormData.full_name.trim()) {
+      showToast('⚠️ Peringatan', 'USER ID / UIM dan Nama Lengkap wajib diisi.', 'warning');
+      return;
+    }
+    setUimSaving(true);
+    try {
+      const isEdit = Boolean(editingUim);
+      const url = isEdit ? `/api/uim/${editingUim.id}` : '/api/uim';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await apiFetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(uimFormData)
+      });
+      const data = await safeJson(res);
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menyimpan data UIM.');
+      }
+      showToast(
+        isEdit ? '✏️ UIM Diperbarui' : '✅ UIM Ditambahkan',
+        `Data UIM "${data.uim_code}" (${data.full_name}) berhasil disimpan.`,
+        'success'
+      );
+      setShowUimModal(false);
+      fetchUimRecords();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    } finally {
+      setUimSaving(false);
+    }
+  };
+
+  const handleDeleteUim = async (id, uimCode, fullName) => {
+    if (!window.confirm(`Apakah Anda yakin ingin menghapus data UIM "${uimCode}" - ${fullName}?`)) return;
+    try {
+      const res = await apiFetch(`/api/uim/${id}`, { method: 'DELETE' });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Gagal menghapus data UIM.');
+      showToast('🗑️ UIM Dihapus', data.message || `Data UIM ${uimCode} berhasil dihapus.`, 'info');
+      fetchUimRecords();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    }
+  };
 
   const fetchUsers = useCallback(async () => {
     setLoadingUsers(true);
@@ -2192,6 +2309,12 @@ function App() {
           onClick={() => setActiveTab('bookmarks')}
         >
           ⭐ Bookmark ({bookmarksList.length})
+        </button>
+        <button 
+          className={`tab-btn ${activeTab === 'uim' ? 'active' : ''}`}
+          onClick={() => setActiveTab('uim')}
+        >
+          🪪 Kelola UIM ({uimTotalRecords.toLocaleString('id-ID')})
         </button>
         {(user.role === 'admin' || user.role === 'operator') && (
           <button 
@@ -4506,6 +4629,236 @@ function App() {
             )}
           </div>
         </main>
+      )}
+
+      {/* TAB: KELOLA UIM (USER ID MANAJEMEN) */}
+      {activeTab === 'uim' && (
+        <main className="main-content">
+          <div className="section-header-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <div>
+              <h2 style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                🪪 Kelola UIM (User ID Manajemen)
+              </h2>
+              <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '4px' }}>
+                Daftar terpusat User ID / UIM, Nama Lengkap, dan Unit Kerja karyawan/pegawai.
+              </p>
+            </div>
+            {(user.role === 'admin' || user.role === 'operator') && (
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={handleOpenAddUim}
+                  style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', border: 'none', padding: '0.55rem 1.1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  ➕ Tambah Data UIM
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Filter & Search Bar */}
+          <div className="search-filter-card" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', padding: '1rem 1.25rem', borderRadius: '12px', marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div style={{ flex: 1, minWidth: '240px', position: 'relative' }}>
+              <input
+                type="text"
+                placeholder="Cari UIM (misal: ID407), Nama Lengkap, atau Unit Kerja..."
+                value={uimSearch}
+                onChange={(e) => setUimSearch(e.target.value)}
+                style={{ width: '100%', padding: '0.65rem 1rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem' }}
+              />
+              {uimSearch && (
+                <button
+                  onClick={() => setUimSearch('')}
+                  style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.9rem' }}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Unit Kerja:</label>
+              <select
+                value={uimUnitFilter}
+                onChange={(e) => { setUimUnitFilter(e.target.value); setUimPage(1); }}
+                style={{ padding: '0.6rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.85rem' }}
+              >
+                <option value="ALL">Semua Unit Kerja ({uimUnits.length})</option>
+                {uimUnits.map((u, i) => (
+                  <option key={i} value={u}>{u}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Table Data UIM */}
+          <div className="users-table-wrapper" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '12px', overflow: 'hidden' }}>
+            {uimLoading ? (
+              <div className="search-loader" style={{ padding: '3rem' }}><div className="spinner"></div><p>Memuat data UIM...</p></div>
+            ) : uimRecords.length === 0 ? (
+              <div className="empty-state" style={{ padding: '3rem', textAlign: 'center' }}>
+                <p style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>🔍</p>
+                <p style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Tidak ada data UIM yang ditemukan.</p>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '4px' }}>Coba ubah kata kunci pencarian atau filter unit kerja.</p>
+              </div>
+            ) : (
+              <table className="users-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ background: 'var(--bg-tertiary)', textAlign: 'left' }}>
+                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '60px', textAlign: 'center' }}>NO</th>
+                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '150px' }}>USER ID / UIM</th>
+                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>NAMA LENGKAP</th>
+                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>UNIT KERJA</th>
+                    {(user.role === 'admin' || user.role === 'operator') && (
+                      <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '130px', textAlign: 'center' }}>AKSI</th>
+                    )}
+                  </tr>
+                </thead>
+                <tbody>
+                  {uimRecords.map((item, index) => {
+                    const rowNum = (uimPage - 1) * uimLimit + index + 1;
+                    return (
+                      <tr key={item.id} style={{ borderBottom: '1px solid var(--glass-border)', transition: 'background 0.15s ease' }}>
+                        <td style={{ padding: '0.75rem 1rem', textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600 }}>
+                          {rowNum}
+                        </td>
+                        <td style={{ padding: '0.75rem 1rem' }}>
+                          <span className="uim-badge">{item.uim_code}</span>
+                        </td>
+                        <td style={{ padding: '0.75rem 1rem', fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.88rem' }}>
+                          {item.full_name}
+                        </td>
+                        <td style={{ padding: '0.75rem 1rem' }}>
+                          <span className="uim-unit-tag">🏢 {item.unit_kerja || '—'}</span>
+                        </td>
+                        {(user.role === 'admin' || user.role === 'operator') && (
+                          <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
+                            <div style={{ display: 'flex', gap: '6px', justifyContent: 'center' }}>
+                              <button
+                                type="button"
+                                className="btn-edit-user"
+                                onClick={() => handleOpenEditUim(item)}
+                                title="Edit UIM"
+                                style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
+                              >
+                                ✏️ Edit
+                              </button>
+                              {user.role === 'admin' && (
+                                <button
+                                  type="button"
+                                  className="btn-delete-user"
+                                  onClick={() => handleDeleteUim(item.id, item.uim_code, item.full_name)}
+                                  title="Hapus UIM"
+                                  style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
+                                >
+                                  🗑️ Hapus
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Pagination Controls */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+              Menampilkan {uimRecords.length > 0 ? (uimPage - 1) * uimLimit + 1 : 0} - {Math.min(uimPage * uimLimit, uimTotalRecords)} dari {uimTotalRecords.toLocaleString('id-ID')} data UIM
+            </span>
+
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <button
+                disabled={uimPage <= 1}
+                onClick={() => setUimPage(p => p - 1)}
+                style={{ padding: '0.4rem 0.75rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '6px', color: uimPage <= 1 ? 'var(--text-muted)' : 'var(--text-primary)', cursor: uimPage <= 1 ? 'not-allowed' : 'pointer', fontSize: '0.8rem' }}
+              >
+                ◀ Sebelum
+              </button>
+
+              <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', padding: '0 0.5rem', fontWeight: 600 }}>
+                Halaman {uimPage} / {uimTotalPages}
+              </span>
+
+              <button
+                disabled={uimPage >= uimTotalPages}
+                onClick={() => setUimPage(p => p + 1)}
+                style={{ padding: '0.4rem 0.75rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '6px', color: uimPage >= uimTotalPages ? 'var(--text-muted)' : 'var(--text-primary)', cursor: uimPage >= uimTotalPages ? 'not-allowed' : 'pointer', fontSize: '0.8rem' }}
+              >
+                Lanjut ▶
+              </button>
+            </div>
+          </div>
+        </main>
+      )}
+
+      {/* Modal Add / Edit UIM */}
+      {showUimModal && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.75rem', width: '100%', maxWidth: '480px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {editingUim ? '✏️ Edit Data UIM' : '➕ Tambah Data UIM Baru'}
+            </h3>
+            <form onSubmit={handleSaveUim}>
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>USER ID / UIM</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: ID407"
+                  value={uimFormData.uim_code}
+                  onChange={(e) => setUimFormData(prev => ({ ...prev, uim_code: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>NAMA LENGKAP</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Bagus Satria"
+                  value={uimFormData.full_name}
+                  onChange={(e) => setUimFormData(prev => ({ ...prev, full_name: e.target.value }))}
+                  required
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: '1.5rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' }}>UNIT KERJA</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Depo Tangerang Mawar"
+                  value={uimFormData.unit_kerja}
+                  onChange={(e) => setUimFormData(prev => ({ ...prev, unit_kerja: e.target.value }))}
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowUimModal(false)}
+                  style={{ padding: '0.6rem 1.2rem', background: 'transparent', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={uimSaving}
+                  style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: uimSaving ? 'not-allowed' : 'pointer', fontSize: '0.85rem' }}
+                >
+                  {uimSaving ? 'Menyimpan...' : 'Simpan'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
       
       <footer className="app-footer-bar">

@@ -379,10 +379,38 @@ const initDatabase = async () => {
       console.log('Pengguna default sukses ditambahkan.');
     }
 
-    // Set default full names for seeded users if null
-    await client.query(`UPDATE users SET full_name = 'Administrator System' WHERE username = 'admin' AND full_name IS NULL;`);
-    await client.query(`UPDATE users SET full_name = 'Operator Staff' WHERE username = 'operator' AND full_name IS NULL;`);
-    await client.query(`UPDATE users SET full_name = 'Viewer Guest' WHERE username = 'viewer' AND full_name IS NULL;`);
+    // Create uim_records table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS uim_records (
+        id SERIAL PRIMARY KEY,
+        uim_code VARCHAR(50) NOT NULL,
+        full_name VARCHAR(255) NOT NULL,
+        unit_kerja VARCHAR(255) NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Check if uim_records is empty and seed initial data from uim_seed_data.json if so
+    const uimCountRes = await client.query('SELECT COUNT(*)::int FROM uim_records;');
+    if (uimCountRes.rows[0].count === 0) {
+      console.log('Menyisipkan data UIM awal...');
+      try {
+        const seedPath = path.join(__dirname, 'uim_seed_data.json');
+        if (fs.existsSync(seedPath)) {
+          const rawSeed = fs.readFileSync(seedPath, 'utf8');
+          const seedData = JSON.parse(rawSeed);
+          for (const item of seedData) {
+            await client.query(
+              'INSERT INTO uim_records (uim_code, full_name, unit_kerja) VALUES ($1, $2, $3);',
+              [item.uim_code || '', item.full_name || '', item.unit_kerja || '']
+            );
+          }
+          console.log(`Berhasil menyisipkan ${seedData.length} data UIM awal.`);
+        }
+      } catch (seedErr) {
+        console.error('Gagal menyisipkan data UIM awal:', seedErr.message);
+      }
+    }
 
     console.log('Inisialisasi database PostgreSQL sukses.');
   } catch (err) {
@@ -1038,6 +1066,188 @@ app.delete('/api/users/:id', authenticateToken, requireRole(['admin']), async (r
   } catch (err) {
     console.error('Error deleting user:', err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// --- UIM (User ID Manajemen) API Endpoints ---
+
+// Get list of UIM records with search, unit filter, & pagination
+app.get('/api/uim', authenticateToken, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 25;
+    const offset = (page - 1) * limit;
+    const search = req.query.search ? req.query.search.trim() : '';
+    const unit = req.query.unit ? req.query.unit.trim() : '';
+
+    let whereConditions = [];
+    let queryParams = [];
+    let paramCounter = 1;
+
+    if (search) {
+      whereConditions.push(`(uim_code ILIKE $${paramCounter} OR full_name ILIKE $${paramCounter} OR unit_kerja ILIKE $${paramCounter})`);
+      queryParams.push(`%${search}%`);
+      paramCounter++;
+    }
+
+    if (unit && unit !== 'ALL') {
+      whereConditions.push(`unit_kerja = $${paramCounter}`);
+      queryParams.push(unit);
+      paramCounter++;
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    // Count query
+    const countRes = await pool.query(`SELECT COUNT(*)::int FROM uim_records ${whereClause};`, queryParams);
+    const totalRecords = countRes.rows[0].count;
+
+    // Select query with pagination
+    const selectQuery = `
+      SELECT id, uim_code, full_name, unit_kerja, created_at 
+      FROM uim_records 
+      ${whereClause} 
+      ORDER BY id ASC 
+      LIMIT $${paramCounter} OFFSET $${paramCounter + 1};
+    `;
+    queryParams.push(limit, offset);
+
+    const recordsRes = await pool.query(selectQuery, queryParams);
+
+    // Get list of all distinct units for dropdown filter
+    const unitsRes = await pool.query(`SELECT DISTINCT unit_kerja FROM uim_records WHERE unit_kerja IS NOT NULL AND unit_kerja != '' ORDER BY unit_kerja ASC;`);
+    const units = unitsRes.rows.map(r => r.unit_kerja);
+
+    res.json({
+      records: recordsRes.rows,
+      total: totalRecords,
+      page,
+      limit,
+      totalPages: Math.ceil(totalRecords / limit) || 1,
+      units
+    });
+  } catch (err) {
+    console.error('Error fetching UIM records:', err);
+    res.status(500).json({ error: 'Gagal mengambil data UIM.' });
+  }
+});
+
+// Get unique unit kerja list for filter
+app.get('/api/uim/units', authenticateToken, async (req, res) => {
+  try {
+    const unitsRes = await pool.query(`SELECT DISTINCT unit_kerja FROM uim_records WHERE unit_kerja IS NOT NULL AND unit_kerja != '' ORDER BY unit_kerja ASC;`);
+    res.json(unitsRes.rows.map(r => r.unit_kerja));
+  } catch (err) {
+    res.status(500).json({ error: 'Gagal mengambil daftar unit kerja.' });
+  }
+});
+
+// Create new UIM record (Admin/Operator)
+app.post('/api/uim', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { uim_code, full_name, unit_kerja } = req.body;
+
+  if (!uim_code || !full_name) {
+    return res.status(400).json({ error: 'USER ID / UIM dan Nama Lengkap wajib diisi.' });
+  }
+
+  try {
+    const insertRes = await pool.query(
+      `INSERT INTO uim_records (uim_code, full_name, unit_kerja) VALUES ($1, $2, $3) RETURNING *;`,
+      [uim_code.trim().toUpperCase(), full_name.trim(), (unit_kerja || 'Umum').trim()]
+    );
+
+    const newRecord = insertRes.rows[0];
+    logActivity('create_uim', `Menambahkan UIM baru: "${newRecord.uim_code}" - ${newRecord.full_name}`, getDeviceInfo(req), req.user);
+    res.status(201).json(newRecord);
+  } catch (err) {
+    console.error('Error adding UIM:', err);
+    res.status(500).json({ error: 'Gagal menambah data UIM.' });
+  }
+});
+
+// Update UIM record (Admin/Operator)
+app.put('/api/uim/:id', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { id } = req.params;
+  const { uim_code, full_name, unit_kerja } = req.body;
+
+  if (!uim_code || !full_name) {
+    return res.status(400).json({ error: 'USER ID / UIM dan Nama Lengkap wajib diisi.' });
+  }
+
+  try {
+    const updateRes = await pool.query(
+      `UPDATE uim_records SET uim_code = $1, full_name = $2, unit_kerja = $3 WHERE id = $4 RETURNING *;`,
+      [uim_code.trim().toUpperCase(), full_name.trim(), (unit_kerja || 'Umum').trim(), id]
+    );
+
+    if (updateRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Data UIM tidak ditemukan.' });
+    }
+
+    const updatedRecord = updateRes.rows[0];
+    logActivity('update_uim', `Memperbarui UIM: "${updatedRecord.uim_code}" - ${updatedRecord.full_name}`, getDeviceInfo(req), req.user);
+    res.json(updatedRecord);
+  } catch (err) {
+    console.error('Error updating UIM:', err);
+    res.status(500).json({ error: 'Gagal memperbarui data UIM.' });
+  }
+});
+
+// Delete UIM record (Admin Only)
+app.delete('/api/uim/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const deleteRes = await pool.query(`DELETE FROM uim_records WHERE id = $1 RETURNING uim_code, full_name;`, [id]);
+    if (deleteRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Data UIM tidak ditemukan.' });
+    }
+
+    const deletedRecord = deleteRes.rows[0];
+    logActivity('delete_uim', `Menghapus UIM: "${deletedRecord.uim_code}" - ${deletedRecord.full_name}`, getDeviceInfo(req), req.user);
+    res.json({ message: `Data UIM ${deletedRecord.uim_code} berhasil dihapus.` });
+  } catch (err) {
+    console.error('Error deleting UIM:', err);
+    res.status(500).json({ error: 'Gagal menghapus data UIM.' });
+  }
+});
+
+// Bulk Import UIM records (Admin/Operator)
+app.post('/api/uim/import', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { records } = req.body;
+
+  if (!Array.isArray(records) || records.length === 0) {
+    return res.status(400).json({ error: 'Data UIM tidak valid atau kosong.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let insertedCount = 0;
+
+    for (const item of records) {
+      const uimCode = (item.uim_code || item.uim || item['USER ID'] || item['USER ID/ UIM'] || '').toString().trim();
+      const fullName = (item.full_name || item.nama || item['NAMA LENGKAP'] || '').toString().trim();
+      const unitKerja = (item.unit_kerja || item.unit || item['UNIT KERJA'] || 'Umum').toString().trim();
+
+      if (uimCode && fullName) {
+        await client.query(
+          `INSERT INTO uim_records (uim_code, full_name, unit_kerja) VALUES ($1, $2, $3);`,
+          [uimCode.toUpperCase(), fullName, unitKerja]
+        );
+        insertedCount++;
+      }
+    }
+
+    await client.query('COMMIT');
+    logActivity('import_uim', `Mengimpor ${insertedCount} data UIM baru.`, getDeviceInfo(req), req.user);
+    res.json({ message: `Berhasil mengimpor ${insertedCount} data UIM.`, insertedCount });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error importing UIM:', err);
+    res.status(500).json({ error: 'Gagal mengimpor data UIM.' });
+  } finally {
+    client.release();
   }
 });
 

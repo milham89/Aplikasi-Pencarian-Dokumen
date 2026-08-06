@@ -164,3 +164,31 @@ body.light-mode {
   .results-card-header { flex-direction: column; align-items: flex-start; gap: 0.5rem; }
   .file-tabs { flex-direction: column; }
 }
+
+/* ===== UIM BADGES & STYLES ===== */
+.uim-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.65rem;
+  border-radius: 6px;
+  font-family: 'Outfit', monospace;
+  font-weight: 700;
+  font-size: 0.82rem;
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  letter-spacing: 0.5px;
+}
+
+.uim-unit-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0.2rem 0.55rem;
+  border-radius: 4px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  background: rgba(139, 92, 246, 0.12);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+}
