@@ -232,6 +232,7 @@ const initDatabase = async () => {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS uim_code VARCHAR(50);
       ALTER TABLE users ADD COLUMN IF NOT EXISTS unit_kerja VARCHAR(255);
+      UPDATE users SET username = uim_code WHERE uim_code IS NOT NULL AND uim_code != '' AND LOWER(username) = LOWER(uim_code);
     `);
 
     // Check if bookmarks table has user_id column

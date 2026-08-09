@@ -290,6 +290,7 @@ function App() {
   const [newUserRole, setNewUserRole] = useState('viewer');
   const [newUimCode, setNewUimCode] = useState('');
   const [newUnitKerja, setNewUnitKerja] = useState('');
+  const [allUimList, setAllUimList] = useState([]);
   const [selectedUserForBookmarks, setSelectedUserForBookmarks] = useState(null);
   const [userBookmarksList, setUserBookmarksList] = useState([]);
   const [loadingUserBookmarks, setLoadingUserBookmarks] = useState(false);
@@ -409,12 +410,13 @@ function App() {
     }
   }, [activeTab, selectedUserFilterForBookmarks, selectedBookmarkUserIds]);
 
-  // Fetch UIM records when UIM tab is active
+  // Fetch all UIM records for user integration dropdown on startup or when users/uim tab active
   useEffect(() => {
-    if (activeTab === 'uim') {
+    if (user && (activeTab === 'uim' || activeTab === 'users')) {
       fetchUimRecords(uimSearch, uimPage, uimLimit, uimUnitFilter);
+      fetchAllUimForDropdown();
     }
-  }, [activeTab, uimPage, uimLimit, uimUnitFilter]);
+  }, [user, activeTab, uimPage, uimLimit, uimUnitFilter]);
 
   // Debounced UIM search
   useEffect(() => {
@@ -579,6 +581,18 @@ function App() {
       setUimLoading(false);
     }
   }, [uimSearch, uimPage, uimLimit, uimUnitFilter, apiFetch, safeJson]);
+
+  const fetchAllUimForDropdown = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/uim?limit=1000');
+      if (res.ok) {
+        const data = await safeJson(res);
+        setAllUimList(data.records || []);
+      }
+    } catch (err) {
+      console.error('Error fetching all UIM for dropdown:', err);
+    }
+  }, [apiFetch, safeJson]);
 
   const handleOpenAddUim = () => {
     setEditingUim(null);
@@ -1100,7 +1114,7 @@ function App() {
     setNewFullName(uimItem.full_name);
     setNewUnitKerja(uimItem.unit_kerja);
     if (!editingUser) {
-      setNewUsername(uimItem.uim_code.toLowerCase());
+      setNewUsername(uimItem.uim_code.toUpperCase());
     }
   };
 
@@ -1110,7 +1124,7 @@ function App() {
     setNewUimCode(uimItem.uim_code);
     setNewFullName(uimItem.full_name);
     setNewUnitKerja(uimItem.unit_kerja);
-    setNewUsername(uimItem.uim_code.toLowerCase());
+    setNewUsername(uimItem.uim_code.toUpperCase());
     setNewPassword('');
     setNewUserRole('viewer');
     showToast('🪪 Integrasi UIM', `Mendaftarkan akun baru untuk pegawai "${uimItem.full_name}" (${uimItem.uim_code}).`, 'info');
@@ -4775,13 +4789,14 @@ function App() {
                       <select
                         value={newUimCode}
                         onChange={(e) => {
-                          const selected = uimRecords.find(r => r.uim_code === e.target.value);
+                          const listToSearch = allUimList.length > 0 ? allUimList : uimRecords;
+                          const selected = listToSearch.find(r => r.uim_code === e.target.value);
                           handleSelectUimForUser(selected);
                         }}
                         style={{ width: '100%', padding: '0.6rem 0.8rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.85rem', marginTop: '6px' }}
                       >
                         <option value="">-- Manual / Tidak Terintegrasi --</option>
-                        {uimRecords.map((r) => (
+                        {(allUimList.length > 0 ? allUimList : uimRecords).map((r) => (
                           <option key={r.id} value={r.uim_code}>
                             {r.uim_code} — {r.full_name} ({r.unit_kerja})
                           </option>
