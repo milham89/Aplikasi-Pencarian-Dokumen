@@ -283,11 +283,13 @@ function App() {
   // User Management state
   const [usersList, setUsersList] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
   const [newUsername, setNewUsername] = useState('');
-  const [newPassword, setNewPassword] = useState('');
   const [newFullName, setNewFullName] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState('viewer');
-  const [editingUser, setEditingUser] = useState(null); // holds user object when editing
+  const [newUimCode, setNewUimCode] = useState('');
+  const [newUnitKerja, setNewUnitKerja] = useState('');
   const [selectedUserForBookmarks, setSelectedUserForBookmarks] = useState(null);
   const [userBookmarksList, setUserBookmarksList] = useState([]);
   const [loadingUserBookmarks, setLoadingUserBookmarks] = useState(false);
@@ -1003,7 +1005,14 @@ function App() {
       const res = await apiFetch('/api/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: newUsername.trim(), password: newPassword, role: newUserRole, full_name: newFullName.trim() || undefined })
+        body: JSON.stringify({
+          username: newUsername.trim(),
+          password: newPassword,
+          role: newUserRole,
+          full_name: newFullName.trim() || undefined,
+          uim_code: newUimCode.trim() || undefined,
+          unit_kerja: newUnitKerja.trim() || undefined
+        })
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1013,6 +1022,8 @@ function App() {
       setNewUsername('');
       setNewPassword('');
       setNewFullName('');
+      setNewUimCode('');
+      setNewUnitKerja('');
       setNewUserRole('viewer');
       fetchUsers();
     } catch (err) {
@@ -1035,7 +1046,9 @@ function App() {
           username: newUsername.trim(),
           password: newPassword ? newPassword : undefined,
           role: newUserRole,
-          full_name: newFullName.trim() || null
+          full_name: newFullName.trim() || null,
+          uim_code: newUimCode.trim() || null,
+          unit_kerja: newUnitKerja.trim() || null
         })
       });
       const data = await res.json();
@@ -1046,6 +1059,8 @@ function App() {
       setNewUsername('');
       setNewPassword('');
       setNewFullName('');
+      setNewUimCode('');
+      setNewUnitKerja('');
       setNewUserRole('viewer');
       setEditingUser(null);
       fetchUsers();
@@ -1058,6 +1073,8 @@ function App() {
     setEditingUser(u);
     setNewUsername(u.username);
     setNewFullName(u.full_name || '');
+    setNewUimCode(u.uim_code || '');
+    setNewUnitKerja(u.unit_kerja || '');
     setNewUserRole(u.role);
     setNewPassword('');
   };
@@ -1066,8 +1083,37 @@ function App() {
     setEditingUser(null);
     setNewUsername('');
     setNewFullName('');
+    setNewUimCode('');
+    setNewUnitKerja('');
     setNewUserRole('viewer');
     setNewPassword('');
+  };
+
+  const handleSelectUimForUser = (uimItem) => {
+    if (!uimItem) {
+      setNewUimCode('');
+      setNewFullName('');
+      setNewUnitKerja('');
+      return;
+    }
+    setNewUimCode(uimItem.uim_code);
+    setNewFullName(uimItem.full_name);
+    setNewUnitKerja(uimItem.unit_kerja);
+    if (!editingUser) {
+      setNewUsername(uimItem.uim_code.toLowerCase());
+    }
+  };
+
+  const handleOpenCreateUserFromUim = (uimItem) => {
+    setActiveTab('users');
+    setEditingUser(null);
+    setNewUimCode(uimItem.uim_code);
+    setNewFullName(uimItem.full_name);
+    setNewUnitKerja(uimItem.unit_kerja);
+    setNewUsername(uimItem.uim_code.toLowerCase());
+    setNewPassword('');
+    setNewUserRole('viewer');
+    showToast('🪪 Integrasi UIM', `Mendaftarkan akun baru untuk pegawai "${uimItem.full_name}" (${uimItem.uim_code}).`, 'info');
   };
 
   const handleDeleteUser = async (userId, username) => {
@@ -4721,13 +4767,38 @@ function App() {
                 <div className="users-form-panel">
                   <h3>{editingUser ? `✏️ Edit Akun: ${editingUser.username}` : '➕ Daftarkan Akun Baru'}</h3>
                   <form onSubmit={editingUser ? handleUpdateUser : handleCreateUser} className="users-create-form">
+                    {/* UIM Integration Dropdown Selector */}
+                    <div className="form-group" style={{ background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)', padding: '0.9rem', borderRadius: '10px', marginBottom: '1rem' }}>
+                      <label style={{ color: '#60a5fa', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        🪪 Integrasikan Dengan Data UIM:
+                      </label>
+                      <select
+                        value={newUimCode}
+                        onChange={(e) => {
+                          const selected = uimRecords.find(r => r.uim_code === e.target.value);
+                          handleSelectUimForUser(selected);
+                        }}
+                        style={{ width: '100%', padding: '0.6rem 0.8rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.85rem', marginTop: '6px' }}
+                      >
+                        <option value="">-- Manual / Tidak Terintegrasi --</option>
+                        {uimRecords.map((r) => (
+                          <option key={r.id} value={r.uim_code}>
+                            {r.uim_code} — {r.full_name} ({r.unit_kerja})
+                          </option>
+                        ))}
+                      </select>
+                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '6px', marginBottom: 0 }}>
+                        💡 Memilih UIM akan mengintegrasikan User ID, Nama Lengkap, & Unit Kerja secara otomatis.
+                      </p>
+                    </div>
+
                     <div className="form-group">
                       <label>Username</label>
                       <input
                         type="text"
                         value={newUsername}
                         onChange={(e) => setNewUsername(e.target.value)}
-                        placeholder="Contoh: operator_budi"
+                        placeholder="Contoh: l901 atau operator_budi"
                         required
                       />
                     </div>
@@ -4737,7 +4808,25 @@ function App() {
                         type="text"
                         value={newFullName}
                         onChange={(e) => setNewFullName(e.target.value)}
-                        placeholder="Contoh: Budi Santoso"
+                        placeholder="Contoh: Rosan Sofian"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>USER ID / UIM <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(opsional)</span></label>
+                      <input
+                        type="text"
+                        value={newUimCode}
+                        onChange={(e) => setNewUimCode(e.target.value)}
+                        placeholder="Contoh: L901"
+                      />
+                    </div>
+                    <div className="form-group">
+                      <label>Unit Kerja <span style={{ color: 'var(--text-muted)', fontWeight: 400, fontSize: '0.8rem' }}>(opsional)</span></label>
+                      <input
+                        type="text"
+                        value={newUnitKerja}
+                        onChange={(e) => setNewUnitKerja(e.target.value)}
+                        placeholder="Contoh: Depo Arsip Bizpark"
                       />
                     </div>
                     <div className="form-group">
@@ -4823,6 +4912,8 @@ function App() {
                         <tr>
                           <th>Username</th>
                           <th>Nama Lengkap</th>
+                          <th>UIM / User ID</th>
+                          <th>Unit Kerja</th>
                           <th>Role</th>
                           <th>Tanggal Dibuat</th>
                           <th>Aksi</th>
@@ -4837,6 +4928,20 @@ function App() {
                             </td>
                             <td style={{ color: u.full_name ? 'var(--text-primary)' : 'var(--text-muted)', fontStyle: u.full_name ? 'normal' : 'italic' }}>
                               {u.full_name || '—'}
+                            </td>
+                            <td>
+                              {u.uim_code ? (
+                                <span className="uim-badge">{u.uim_code}</span>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>—</span>
+                              )}
+                            </td>
+                            <td>
+                              {u.unit_kerja ? (
+                                <span className="uim-unit-tag">🏢 {u.unit_kerja}</span>
+                              ) : (
+                                <span style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>—</span>
+                              )}
                             </td>
                             <td>
                               <span className={`role-badge role-${u.role}`}>
@@ -5251,6 +5356,16 @@ function App() {
                               >
                                 ✏️ Edit
                               </button>
+                              {user.role === 'admin' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenCreateUserFromUim(item)}
+                                  title={`Daftarkan Akun User untuk ${item.full_name} (${item.uim_code})`}
+                                  style={{ background: 'linear-gradient(135deg, #10b981, #059669)', color: '#fff', border: 'none', padding: '0.35rem 0.65rem', borderRadius: '6px', fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                                >
+                                  👤 Buat Akun
+                                </button>
+                              )}
                               {user.role === 'admin' && (
                                 <button
                                   type="button"

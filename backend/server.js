@@ -227,9 +227,11 @@ const initDatabase = async () => {
       );
     `);
 
-    // Migrate: add full_name column if not exists
+    // Migrate: add full_name, uim_code, unit_kerja columns if not exists
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR(100);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS uim_code VARCHAR(50);
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS unit_kerja VARCHAR(255);
     `);
 
     // Check if bookmarks table has user_id column
@@ -948,7 +950,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
 // User Management API: Get all users (Admin Only)
 app.get('/api/users', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
-    const usersRes = await pool.query('SELECT id, username, full_name, role, created_at FROM users ORDER BY created_at DESC;');
+    const usersRes = await pool.query('SELECT id, username, full_name, role, uim_code, unit_kerja, created_at FROM users ORDER BY created_at DESC;');
     res.json(usersRes.rows);
   } catch (err) {
     console.error('Error fetching users:', err);
@@ -958,7 +960,7 @@ app.get('/api/users', authenticateToken, requireRole(['admin']), async (req, res
 
 // User Management API: Create new user (Admin Only)
 app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, res) => {
-  const { username, password, role, full_name } = req.body;
+  const { username, password, role, full_name, uim_code, unit_kerja } = req.body;
   if (!username || !password || !role) {
     return res.status(400).json({ error: 'Username, password, dan role wajib diisi.' });
   }
@@ -976,12 +978,12 @@ app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, re
 
     const passwordHash = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (username, password_hash, role, full_name) VALUES ($1, $2, $3, $4) RETURNING id, username, full_name, role, created_at;',
-      [username, passwordHash, role, full_name || null]
+      'INSERT INTO users (username, password_hash, role, full_name, uim_code, unit_kerja) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, username, full_name, role, uim_code, unit_kerja, created_at;',
+      [username.trim(), passwordHash, role, full_name || null, uim_code || null, unit_kerja || null]
     );
 
     const newUser = result.rows[0];
-    logActivity('create_user', `Membuat akun baru: "${newUser.username}" dengan hak akses ${newUser.role}`, getDeviceInfo(req), req.user);
+    logActivity('create_user', `Membuat akun baru: "${newUser.username}" (${newUser.role}) integrated with UIM "${newUser.uim_code || '-'}"`, getDeviceInfo(req), req.user);
     res.status(201).json(newUser);
   } catch (err) {
     console.error('Error creating user:', err);
@@ -992,7 +994,7 @@ app.post('/api/users', authenticateToken, requireRole(['admin']), async (req, re
 // User Management API: Update user (Admin Only)
 app.put('/api/users/:id', authenticateToken, requireRole(['admin']), async (req, res) => {
   const { id } = req.params;
-  const { username, password, role, full_name } = req.body;
+  const { username, password, role, full_name, uim_code, unit_kerja } = req.body;
 
   if (!username || !role) {
     return res.status(400).json({ error: 'Username dan role wajib diisi.' });
@@ -1023,23 +1025,23 @@ app.put('/api/users/:id', authenticateToken, requireRole(['admin']), async (req,
       const passwordHash = await bcrypt.hash(password, 10);
       result = await pool.query(
         `UPDATE users 
-         SET username = $1, password_hash = $2, role = $3, full_name = $4 
-         WHERE id = $5 
-         RETURNING id, username, full_name, role, created_at;`,
-        [username.trim(), passwordHash, role, full_name || null, id]
+         SET username = $1, password_hash = $2, role = $3, full_name = $4, uim_code = $5, unit_kerja = $6 
+         WHERE id = $7 
+         RETURNING id, username, full_name, role, uim_code, unit_kerja, created_at;`,
+        [username.trim(), passwordHash, role, full_name || null, uim_code || null, unit_kerja || null, id]
       );
     } else {
       result = await pool.query(
         `UPDATE users 
-         SET username = $1, role = $2, full_name = $3 
-         WHERE id = $4 
-         RETURNING id, username, full_name, role, created_at;`,
-        [username.trim(), role, full_name || null, id]
+         SET username = $1, role = $2, full_name = $3, uim_code = $4, unit_kerja = $5 
+         WHERE id = $6 
+         RETURNING id, username, full_name, role, uim_code, unit_kerja, created_at;`,
+        [username.trim(), role, full_name || null, uim_code || null, unit_kerja || null, id]
       );
     }
 
     const updatedUser = result.rows[0];
-    logActivity('update_user', `Memperbarui akun: "${updatedUser.username}" (${updatedUser.role})`, getDeviceInfo(req), req.user);
+    logActivity('update_user', `Memperbarui akun: "${updatedUser.username}" (${updatedUser.role}) integrated with UIM "${updatedUser.uim_code || '-'}"`, getDeviceInfo(req), req.user);
     res.json(updatedUser);
   } catch (err) {
     console.error('Error updating user:', err);
