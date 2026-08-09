@@ -54,6 +54,12 @@ function App() {
   const [showBulkUnitModal, setShowBulkUnitModal] = useState(false);
   const [bulkUnitValue, setBulkUnitValue] = useState('');
   const [bulkUnitSaving, setBulkUnitSaving] = useState(false);
+
+  // Unit rename / move state
+  const [showRenameUnitModal, setShowRenameUnitModal] = useState(false);
+  const [targetOldUnit, setTargetOldUnit] = useState('');
+  const [newTargetUnitName, setNewTargetUnitName] = useState('');
+  const [renameUnitSaving, setRenameUnitSaving] = useState(false);
   
   // Dark/Light Theme
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -928,6 +934,45 @@ function App() {
       showToast('⚠️ Gagal', err.message, 'error');
     } finally {
       setBulkUnitSaving(false);
+    }
+  };
+
+  const handleOpenRenameUnitModal = (unitName) => {
+    setTargetOldUnit(unitName || (uimUnitFilter !== 'ALL' ? uimUnitFilter : ''));
+    setNewTargetUnitName('');
+    setShowRenameUnitModal(true);
+  };
+
+  const handleSaveRenameUnit = async (e) => {
+    e.preventDefault();
+    if (!targetOldUnit.trim() || !newTargetUnitName.trim()) {
+      showToast('⚠️ Peringatan', 'Unit Kerja Asal dan Unit Kerja Baru wajib diisi.', 'warning');
+      return;
+    }
+    setRenameUnitSaving(true);
+    try {
+      const res = await apiFetch('/api/uim/rename-unit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          old_unit: targetOldUnit.trim(),
+          new_unit: newTargetUnitName.trim()
+        })
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Gagal memindahkan Unit Kerja.');
+
+      showToast('🏢 Unit Kerja Berhasil Dipindahkan', data.message, 'success');
+      setShowRenameUnitModal(false);
+      if (uimUnitFilter === targetOldUnit) {
+        setUimUnitFilter(newTargetUnitName.trim());
+      }
+      fetchUimRecords();
+      fetchUimUnits();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    } finally {
+      setRenameUnitSaving(false);
     }
   };
 
@@ -5002,7 +5047,7 @@ function App() {
               )}
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
               <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Unit Kerja:</label>
               <select
                 value={uimUnitFilter}
@@ -5014,6 +5059,17 @@ function App() {
                   <option key={i} value={u}>{u}</option>
                 ))}
               </select>
+
+              {(user.role === 'admin' || user.role === 'operator') && uimUnitFilter !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => handleOpenRenameUnitModal(uimUnitFilter)}
+                  style={{ background: 'linear-gradient(135deg, #8b5cf6, #ec4899)', color: '#fff', border: 'none', padding: '0.55rem 0.9rem', borderRadius: '8px', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  title={`Ubah Nama Unit Kerja "${uimUnitFilter}" Untuk Seluruh Pegawai`}
+                >
+                  🔄 Ubah Semua Pegawai Unit Ini ({uimTotalRecords})
+                </button>
+              )}
             </div>
           </div>
 
@@ -5278,35 +5334,49 @@ function App() {
         </div>
       )}
 
-      {/* Modal Bulk Update Unit Kerja */}
-      {showBulkUnitModal && (
+      {/* Modal Rename / Move Unit Kerja */}
+      {showRenameUnitModal && (
         <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
-          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.75rem', width: '100%', maxWidth: '500px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)' }}>
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.75rem', width: '100%', maxWidth: '520px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)' }}>
             <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-              🏢 Update Unit Kerja Massal
+              🔄 Ubah / Pindahkan Seluruh Pegawai Unit Kerja
             </h3>
             <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
-              Mengubah Unit Kerja untuk <strong style={{ color: '#60a5fa' }}>{selectedUimIds.length} data UIM terpilih</strong> secara bersamaan.
+              Fitur ini akan mengubah Unit Kerja untuk <strong style={{ color: '#ec4899' }}>SEMUA pegawai</strong> yang berada di unit kerja asal yang Anda pilih.
             </p>
-            <form onSubmit={handleSaveBulkUnit}>
-              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Pilih Dari Daftar Unit Kerja Yang Ada:</label>
+            <form onSubmit={handleSaveRenameUnit}>
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Unit Kerja Asal (Yang Ingin Diubah):</label>
                 <select
-                  onChange={(e) => { if (e.target.value) setBulkUnitValue(e.target.value); }}
-                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', marginBottom: '1rem' }}
+                  value={targetOldUnit}
+                  onChange={(e) => setTargetOldUnit(e.target.value)}
+                  required
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem' }}
                 >
-                  <option value="">-- Pilih Unit Kerja Yang Sudah Ada --</option>
+                  <option value="">-- Pilih Unit Kerja Asal --</option>
                   {uimUnits.map((u, i) => (
                     <option key={i} value={u}>{u}</option>
                   ))}
                 </select>
+              </div>
 
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Atau Ketik Nama Unit Kerja Baru:</label>
+              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Pilih Unit Kerja Tujuan (Atau Ketik Baru):</label>
+                <select
+                  onChange={(e) => { if (e.target.value) setNewTargetUnitName(e.target.value); }}
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', marginBottom: '0.75rem' }}
+                >
+                  <option value="">-- Pilih Dari Unit Kerja Yang Sudah Ada --</option>
+                  {uimUnits.filter(u => u !== targetOldUnit).map((u, i) => (
+                    <option key={i} value={u}>{u}</option>
+                  ))}
+                </select>
+
                 <input
                   type="text"
-                  placeholder="Contoh: Depo Arsip Majalengka 2"
-                  value={bulkUnitValue}
-                  onChange={(e) => setBulkUnitValue(e.target.value)}
+                  placeholder="Atau ketik nama Unit Kerja baru (misal: Depo Arsip Purwakarta)..."
+                  value={newTargetUnitName}
+                  onChange={(e) => setNewTargetUnitName(e.target.value)}
                   required
                   style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
                 />
@@ -5315,17 +5385,17 @@ function App() {
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
                 <button
                   type="button"
-                  onClick={() => setShowBulkUnitModal(false)}
+                  onClick={() => setShowRenameUnitModal(false)}
                   style={{ padding: '0.6rem 1.2rem', background: 'transparent', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem' }}
                 >
                   Batal
                 </button>
                 <button
                   type="submit"
-                  disabled={bulkUnitSaving}
-                  style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
+                  disabled={renameUnitSaving}
+                  style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #8b5cf6, #ec4899)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
                 >
-                  {bulkUnitSaving ? 'Menyimpan...' : `Simpan Update (${selectedUimIds.length} Data)`}
+                  {renameUnitSaving ? 'Memindahkan...' : `Simpan & Pindahkan Pegawai`}
                 </button>
               </div>
             </form>

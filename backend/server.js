@@ -1239,6 +1239,32 @@ app.post('/api/uim/bulk-update-unit', authenticateToken, requireRole(['admin', '
   }
 });
 
+// Rename/Move all UIM users from an old unit to a new unit (Admin/Operator)
+app.post('/api/uim/rename-unit', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { old_unit, new_unit } = req.body;
+
+  if (!old_unit || !old_unit.trim()) {
+    return res.status(400).json({ error: 'Unit Kerja asal wajib dipilih.' });
+  }
+
+  if (!new_unit || !new_unit.trim()) {
+    return res.status(400).json({ error: 'Nama Unit Kerja baru wajib diisi.' });
+  }
+
+  try {
+    const updateRes = await pool.query(
+      `UPDATE uim_records SET unit_kerja = $1 WHERE unit_kerja = $2 RETURNING *;`,
+      [new_unit.trim(), old_unit.trim()]
+    );
+
+    logActivity('rename_uim_unit', `Memindahkan ${updateRes.rowCount} UIM dari "${old_unit.trim()}" ke "${new_unit.trim()}"`, getDeviceInfo(req), req.user);
+    res.json({ message: `Berhasil memindahkan ${updateRes.rowCount} data UIM dari "${old_unit.trim()}" ke "${new_unit.trim()}".`, updatedCount: updateRes.rowCount });
+  } catch (err) {
+    console.error('Error renaming UIM unit:', err);
+    res.status(500).json({ error: 'Gagal memindahkan Unit Kerja.' });
+  }
+});
+
 // Bulk Import UIM records (Admin/Operator)
 app.post('/api/uim/import', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
   const { records } = req.body;
