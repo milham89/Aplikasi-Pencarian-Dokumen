@@ -1213,6 +1213,32 @@ app.delete('/api/uim/:id', authenticateToken, requireRole(['admin']), async (req
   }
 });
 
+// Bulk Update Unit Kerja for selected UIM IDs (Admin/Operator)
+app.post('/api/uim/bulk-update-unit', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
+  const { ids, unit_kerja } = req.body;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'Pilih setidaknya satu data UIM untuk diperbarui.' });
+  }
+
+  if (!unit_kerja || !unit_kerja.trim()) {
+    return res.status(400).json({ error: 'Nama Unit Kerja baru wajib diisi.' });
+  }
+
+  try {
+    const updateRes = await pool.query(
+      `UPDATE uim_records SET unit_kerja = $1 WHERE id = ANY($2::int[]) RETURNING *;`,
+      [unit_kerja.trim(), ids]
+    );
+
+    logActivity('bulk_update_uim_unit', `Memperbarui Unit Kerja ${updateRes.rowCount} UIM menjadi "${unit_kerja.trim()}"`, getDeviceInfo(req), req.user);
+    res.json({ message: `Berhasil memperbarui Unit Kerja ${updateRes.rowCount} data UIM.`, updatedCount: updateRes.rowCount });
+  } catch (err) {
+    console.error('Error bulk updating UIM unit:', err);
+    res.status(500).json({ error: 'Gagal memperbarui Unit Kerja massal.' });
+  }
+});
+
 // Bulk Import UIM records (Admin/Operator)
 app.post('/api/uim/import', authenticateToken, requireRole(['admin', 'operator']), async (req, res) => {
   const { records } = req.body;

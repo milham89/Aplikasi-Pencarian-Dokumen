@@ -49,6 +49,12 @@ function App() {
   const [uimFormData, setUimFormData] = useState({ uim_code: '', full_name: '', unit_kerja: '' });
   const [uimSaving, setUimSaving] = useState(false);
   
+  // Bulk selection & update state for UIM
+  const [selectedUimIds, setSelectedUimIds] = useState([]);
+  const [showBulkUnitModal, setShowBulkUnitModal] = useState(false);
+  const [bulkUnitValue, setBulkUnitValue] = useState('');
+  const [bulkUnitSaving, setBulkUnitSaving] = useState(false);
+  
   // Dark/Light Theme
   const [isDarkMode, setIsDarkMode] = useState(() => {
     const saved = localStorage.getItem('app_theme');
@@ -868,6 +874,60 @@ function App() {
     } catch (err) {
       console.error('Error printing PDF:', err);
       showToast('⚠️ Gagal Cetak PDF', err.message, 'error');
+    }
+  };
+
+  const handleToggleSelectAllUim = () => {
+    if (selectedUimIds.length === uimRecords.length) {
+      setSelectedUimIds([]);
+    } else {
+      setSelectedUimIds(uimRecords.map(r => r.id));
+    }
+  };
+
+  const handleToggleSelectUim = (id) => {
+    setSelectedUimIds(prev => 
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+  };
+
+  const handleOpenBulkUnitModal = () => {
+    if (selectedUimIds.length === 0) {
+      showToast('⚠️ Peringatan', 'Pilih setidaknya satu data UIM terlebih dahulu.', 'warning');
+      return;
+    }
+    setBulkUnitValue('');
+    setShowBulkUnitModal(true);
+  };
+
+  const handleSaveBulkUnit = async (e) => {
+    e.preventDefault();
+    if (!bulkUnitValue.trim()) {
+      showToast('⚠️ Peringatan', 'Nama Unit Kerja baru tidak boleh kosong.', 'warning');
+      return;
+    }
+    setBulkUnitSaving(true);
+    try {
+      const res = await apiFetch('/api/uim/bulk-update-unit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: selectedUimIds,
+          unit_kerja: bulkUnitValue.trim()
+        })
+      });
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui Unit Kerja massal.');
+      
+      showToast('🏢 Unit Kerja Diperbarui', data.message || `Berhasil memperbarui ${selectedUimIds.length} data UIM.`, 'success');
+      setShowBulkUnitModal(false);
+      setSelectedUimIds([]);
+      fetchUimRecords();
+      fetchUimUnits();
+    } catch (err) {
+      showToast('⚠️ Gagal', err.message, 'error');
+    } finally {
+      setBulkUnitSaving(false);
     }
   };
 
@@ -4957,6 +5017,36 @@ function App() {
             </div>
           </div>
 
+          {/* Bulk Action Toolbar */}
+          {selectedUimIds.length > 0 && (
+            <div style={{ background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(139, 92, 246, 0.15))', border: '1px solid rgba(59, 130, 246, 0.4)', borderRadius: '12px', padding: '0.85rem 1.25rem', marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#60a5fa' }}>
+                  ☑️ {selectedUimIds.length} Data UIM Terpilih
+                </span>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  (Centang baris tabel untuk menambah/mengurangi pilihan)
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={handleOpenBulkUnitModal}
+                  style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', border: 'none', padding: '0.5rem 1rem', borderRadius: '8px', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  🏢 Ubah Unit Kerja Massal
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedUimIds([])}
+                  style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', color: 'var(--text-secondary)', padding: '0.5rem 0.9rem', borderRadius: '8px', fontSize: '0.82rem', cursor: 'pointer' }}
+                >
+                  ✕ Batal Pilih
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Table Data UIM */}
           <div className="users-table-wrapper" style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '12px', overflow: 'hidden' }}>
             {uimLoading ? (
@@ -4971,7 +5061,18 @@ function App() {
               <table className="users-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ background: 'var(--bg-tertiary)', textAlign: 'left' }}>
-                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '60px', textAlign: 'center' }}>NO</th>
+                    {(user.role === 'admin' || user.role === 'operator') && (
+                      <th style={{ padding: '0.85rem 1rem', width: '40px', textAlign: 'center' }}>
+                        <input
+                          type="checkbox"
+                          checked={uimRecords.length > 0 && selectedUimIds.length === uimRecords.length}
+                          onChange={handleToggleSelectAllUim}
+                          title="Pilih / Batal Pilih Semua Data Halaman Ini"
+                          style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: '#3b82f6' }}
+                        />
+                      </th>
+                    )}
+                    <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '50px', textAlign: 'center' }}>NO</th>
                     <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', width: '150px' }}>USER ID / UIM</th>
                     <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>NAMA LENGKAP</th>
                     <th style={{ padding: '0.85rem 1rem', fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase' }}>UNIT KERJA</th>
@@ -4983,8 +5084,19 @@ function App() {
                 <tbody>
                   {uimRecords.map((item, index) => {
                     const rowNum = (uimPage - 1) * uimLimit + index + 1;
+                    const isSelected = selectedUimIds.includes(item.id);
                     return (
-                      <tr key={item.id} style={{ borderBottom: '1px solid var(--glass-border)', transition: 'background 0.15s ease' }}>
+                      <tr key={item.id} style={{ borderBottom: '1px solid var(--glass-border)', background: isSelected ? 'rgba(59, 130, 246, 0.08)' : 'transparent', transition: 'background 0.15s ease' }}>
+                        {(user.role === 'admin' || user.role === 'operator') && (
+                          <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleToggleSelectUim(item.id)}
+                              style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: '#3b82f6' }}
+                            />
+                          </td>
+                        )}
                         <td style={{ padding: '0.75rem 1rem', textAlign: 'center', fontSize: '0.85rem', color: 'var(--text-muted)', fontWeight: 600 }}>
                           {rowNum}
                         </td>
@@ -4995,7 +5107,19 @@ function App() {
                           {item.full_name}
                         </td>
                         <td style={{ padding: '0.75rem 1rem' }}>
-                          <span className="uim-unit-tag">🏢 {item.unit_kerja || '—'}</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <span className="uim-unit-tag">🏢 {item.unit_kerja || '—'}</span>
+                            {(user.role === 'admin' || user.role === 'operator') && (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEditUim(item)}
+                                title="Ubah Unit Kerja User Ini"
+                                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '0.75rem', padding: '2px 4px', borderRadius: '4px' }}
+                              >
+                                ✏️
+                              </button>
+                            )}
+                          </div>
                         </td>
                         {(user.role === 'admin' || user.role === 'operator') && (
                           <td style={{ padding: '0.75rem 1rem', textAlign: 'center' }}>
@@ -5004,7 +5128,7 @@ function App() {
                                 type="button"
                                 className="btn-edit-user"
                                 onClick={() => handleOpenEditUim(item)}
-                                title="Edit UIM"
+                                title="Edit Data UIM"
                                 style={{ padding: '0.35rem 0.65rem', fontSize: '0.75rem' }}
                               >
                                 ✏️ Edit
@@ -5147,6 +5271,61 @@ function App() {
                   style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: uimSaving ? 'not-allowed' : 'pointer', fontSize: '0.85rem' }}
                 >
                   {uimSaving ? 'Menyimpan...' : 'Simpan'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Bulk Update Unit Kerja */}
+      {showBulkUnitModal && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.75rem', width: '100%', maxWidth: '500px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              🏢 Update Unit Kerja Massal
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+              Mengubah Unit Kerja untuk <strong style={{ color: '#60a5fa' }}>{selectedUimIds.length} data UIM terpilih</strong> secara bersamaan.
+            </p>
+            <form onSubmit={handleSaveBulkUnit}>
+              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Pilih Dari Daftar Unit Kerja Yang Ada:</label>
+                <select
+                  onChange={(e) => { if (e.target.value) setBulkUnitValue(e.target.value); }}
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', marginBottom: '1rem' }}
+                >
+                  <option value="">-- Pilih Unit Kerja Yang Sudah Ada --</option>
+                  {uimUnits.map((u, i) => (
+                    <option key={i} value={u}>{u}</option>
+                  ))}
+                </select>
+
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Atau Ketik Nama Unit Kerja Baru:</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Depo Arsip Majalengka 2"
+                  value={bulkUnitValue}
+                  onChange={(e) => setBulkUnitValue(e.target.value)}
+                  required
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowBulkUnitModal(false)}
+                  style={{ padding: '0.6rem 1.2rem', background: 'transparent', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={bulkUnitSaving}
+                  style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  {bulkUnitSaving ? 'Menyimpan...' : `Simpan Update (${selectedUimIds.length} Data)`}
                 </button>
               </div>
             </form>
