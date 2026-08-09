@@ -2175,6 +2175,90 @@ app.get('/api/search', authenticateToken, async (req, res) => {
   }
 });
 
+// 5a-2. AI Natural Language Query Search API
+app.post('/api/search/nl-query', authenticateToken, async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt || !prompt.trim()) {
+    return res.status(400).json({ error: 'Kalimat pencarian Bahasa Alami tidak boleh kosong.' });
+  }
+
+  const queryText = prompt.trim();
+  const userId = req.user.id;
+
+  try {
+    const stopWords = new Set(['cari', 'tampilkan', 'data', 'pegawai', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 'file', 'berkas', 'dokumen', 'laporan', 'tolong', 'ada', 'siapa', 'berapa']);
+    const rawTokens = queryText.toLowerCase().split(/[\s,.-]+/).filter(Boolean);
+    const keywords = rawTokens.filter(t => !stopWords.has(t) && t.length > 1);
+    const finalKeywords = keywords.length > 0 ? keywords : rawTokens;
+
+    const filterClauses = [];
+    const queryParams = [];
+
+    finalKeywords.forEach((kw) => {
+      queryParams.push(`%${kw}%`);
+      filterClauses.push(`r.row_data::text ILIKE $${queryParams.length}`);
+    });
+
+    const userIdParamIndex = queryParams.length + 1;
+    queryParams.push(userId);
+
+    const searchQuery = `
+      SELECT 
+        r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, 
+        f.filename, f.uploaded_at,
+        (b.id IS NOT NULL) AS is_bookmarked
+      FROM document_rows r
+      JOIN uploaded_files f ON r.file_id = f.id
+      LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
+      ${filterClauses.length > 0 ? `WHERE ${filterClauses.join(' OR ')}` : ''}
+      ORDER BY r.row_number ASC
+      LIMIT 150;
+    `;
+
+    const searchRes = await pool.query(searchQuery, queryParams);
+    const searchRows = searchRes.rows;
+
+    const fileMap = new Map();
+    searchRows.forEach(row => {
+      const fid = row.file_id;
+      if (!fileMap.has(fid)) {
+        fileMap.set(fid, {
+          fileId: fid,
+          filename: row.filename,
+          uploadedAt: row.uploaded_at,
+          matches: []
+        });
+      }
+      fileMap.get(fid).matches.push({
+        id: row.id,
+        sheetName: row.sheet_name,
+        rowNumber: row.row_number,
+        rowData: row.row_data,
+        isBookmarked: !!row.is_bookmarked
+      });
+    });
+
+    const files = Array.from(fileMap.values());
+
+    const aiSummary = searchRows.length > 0
+      ? `✨ **AI Analysis**: Ditemukan **${searchRows.length} baris data** di **${files.length} dokumen berkas** yang cocok dengan kueri Bahasa Alami: *"${queryText}"*.`
+      : `⚠️ **AI Analysis**: Tidak ditemukan data spesifik yang cocok dengan kueri Bahasa Alami: *"${queryText}"*. Coba gunakan kata kunci atau nama unit yang sejenis.`;
+
+    logActivity('search_nl_ai', `Pencarian AI Bahasa Alami: "${queryText}" (Menghasilkan ${searchRows.length} data)`, getDeviceInfo(req), req.user);
+
+    res.json({
+      query: queryText,
+      totalMatches: searchRows.length,
+      filesCount: files.length,
+      files,
+      aiSummary
+    });
+  } catch (err) {
+    console.error('Error NL query search:', err);
+    res.status(500).json({ error: 'Gagal memproses pencarian Bahasa Alami: ' + err.message });
+  }
+});
+
 // 5. Get list of all uploaded files
 app.get('/api/files', authenticateToken, async (req, res) => {
   try {

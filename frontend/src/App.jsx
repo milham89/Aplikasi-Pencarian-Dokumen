@@ -136,7 +136,7 @@ function App() {
   const [editCellValue, setEditCellValue] = useState('');
   const [isSavingCell, setIsSavingCell] = useState(false);
 
-  // AI Chatbot State
+  // AI Chatbot & Natural Language Query State
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([
     {
@@ -152,6 +152,16 @@ function App() {
   const [chatSelectedFileId, setChatSelectedFileId] = useState('all');
   const [chatModelMode, setChatModelMode] = useState('auto'); // 'auto' | 'gemini' | 'local'
   const [highlightedRowNumber, setHighlightedRowNumber] = useState(null);
+
+  // Natural Language Query AI Search & Chat With File state
+  const [searchMode, setSearchMode] = useState('exact'); // 'exact' | 'flexible' | 'ai_nl'
+  const [nlAiSummary, setNlAiSummary] = useState(null);
+  const [isNlSearching, setIsNlSearching] = useState(false);
+  const [activeChatFile, setActiveChatFile] = useState(null);
+  const [showChatWithFileModal, setShowChatWithFileModal] = useState(false);
+  const [chatFileMessages, setChatFileMessages] = useState([]);
+  const [chatFileInput, setChatFileInput] = useState('');
+  const [chatFileLoading, setChatFileLoading] = useState(false);
 
   // Search History state
   const [searchHistory, setSearchHistory] = useState(() => {
@@ -1128,6 +1138,98 @@ function App() {
     setNewPassword('');
     setNewUserRole('viewer');
     showToast('🪪 Integrasi UIM', `Mendaftarkan akun baru untuk pegawai "${uimItem.full_name}" (${uimItem.uim_code}).`, 'info');
+  };
+
+  const handleSearchNLQuery = async (promptText = searchQuery) => {
+    if (!promptText || !promptText.trim()) return;
+    const cleanPrompt = promptText.trim();
+    setIsNlSearching(true);
+    setSearchUIState('loading');
+    setNlAiSummary(null);
+    try {
+      const res = await apiFetch('/api/search/nl-query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: cleanPrompt })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSearchResults(data.files || []);
+        setTotalMatchesCount(data.totalMatches || 0);
+        setNlAiSummary(data.aiSummary || null);
+        setSearchUIState('results');
+      } else {
+        throw new Error('Gagal memproses pencarian Bahasa Alami');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('⚠️ Gagal', err.message, 'error');
+      setSearchUIState('results');
+    } finally {
+      setIsNlSearching(false);
+    }
+  };
+
+  const handleOpenChatWithFile = (fileItem) => {
+    setActiveChatFile(fileItem);
+    setShowChatWithFileModal(true);
+    setChatFileMessages([
+      {
+        id: 'welcome-' + fileItem.id,
+        sender: 'ai',
+        text: `Halo! Saya **AI Assistant** khusus untuk berkas **${fileItem.filename}** 📄.\n\nSilakan tanyakan apa saja tentang isi berkas ini, seperti membuat ringkasan, menghitung data, atau mencari baris tertentu!`,
+        timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+        sources: []
+      }
+    ]);
+    setChatFileInput('');
+  };
+
+  const handleSendFileChat = async (e, customPrompt) => {
+    if (e) e.preventDefault();
+    const promptText = (customPrompt || chatFileInput).trim();
+    if (!promptText || !activeChatFile) return;
+
+    const userMsg = {
+      id: 'msg-' + Date.now(),
+      sender: 'user',
+      text: promptText,
+      timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })
+    };
+
+    setChatFileMessages(prev => [...prev, userMsg]);
+    if (!customPrompt) setChatFileInput('');
+    setChatFileLoading(true);
+
+    try {
+      const res = await apiFetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: promptText,
+          fileId: activeChatFile.id,
+          modelMode: 'auto'
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const aiMsg = {
+          id: 'msg-ai-' + Date.now(),
+          sender: 'ai',
+          text: data.reply,
+          timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }),
+          sources: data.sources || []
+        };
+        setChatFileMessages(prev => [...prev, aiMsg]);
+      } else {
+        throw new Error('Gagal mendapatkan respon AI.');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('⚠️ Error', err.message, 'error');
+    } finally {
+      setChatFileLoading(false);
+    }
   };
 
   const handleDeleteUser = async (userId, username) => {
@@ -2783,22 +2885,52 @@ function App() {
         {/* TAB 1: SEARCH */}
         {activeTab === 'search' && (
           <div className="search-tab-content">
-            <div className="search-bar-row">
-              <div className="search-bar-container">
+            {/* AI Search Mode Selector */}
+            <div className="ai-mode-selector">
+              <button
+                type="button"
+                className={`ai-mode-pill ${searchMode === 'exact' ? 'active' : ''}`}
+                onClick={() => { setSearchMode('exact'); setNlAiSummary(null); }}
+              >
+                🔍 Pencarian Tepat
+              </button>
+              <button
+                type="button"
+                className={`ai-mode-pill ${searchMode === 'flexible' ? 'active' : ''}`}
+                onClick={() => { setSearchMode('flexible'); setNlAiSummary(null); }}
+              >
+                ⚡ Fleksibel
+              </button>
+              <button
+                type="button"
+                className={`ai-mode-pill ${searchMode === 'ai_nl' ? 'active' : ''}`}
+                onClick={() => { setSearchMode('ai_nl'); setNlAiSummary(null); }}
+              >
+                🤖 AI Bahasa Alami (Natural Language)
+              </button>
+            </div>
+
+            <div className="search-box-wrapper">
+              <div className="search-box">
                 <span className="search-icon">🔍</span>
                 <input
                   ref={searchInputRef}
                   type="text"
                   className="search-input"
-                  placeholder="Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"
+                  placeholder={searchMode === 'ai_nl' ? "Ketik pertanyaan Bahasa Alami... (contoh: Cari data pegawai depo banjar)" : "Cari nama, alamat, nomor telepon, kode barang... (Tekan '/' untuk fokus)"}
                   value={searchQuery}
                   onChange={(e) => {
                     isManualTypingRef.current = true;
                     setSearchQuery(e.target.value);
                   }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && searchMode === 'ai_nl') {
+                      handleSearchNLQuery(searchQuery);
+                    }
+                  }}
                 />
                 {searchQuery && (
-                  <button className="clear-btn" onClick={() => setSearchQuery('')}>✕</button>
+                  <button className="clear-btn" onClick={() => { setSearchQuery(''); setNlAiSummary(null); }}>✕</button>
                 )}
               </div>
               <button
@@ -2808,7 +2940,46 @@ function App() {
               >
                 ⚙️ Filter Lanjutan
               </button>
+              {searchMode === 'ai_nl' && (
+                <button
+                  type="button"
+                  className="btn-chat-file"
+                  onClick={() => handleSearchNLQuery(searchQuery)}
+                  disabled={isNlSearching}
+                  style={{ height: '48px', padding: '0 1.2rem', fontSize: '0.88rem' }}
+                >
+                  {isNlSearching ? '⏳ Memproses...' : '🤖 Cari AI'}
+                </button>
+              )}
             </div>
+
+            {/* Prompt Chips for AI Natural Language Query */}
+            {searchMode === 'ai_nl' && (
+              <div className="prompt-chips-container">
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', fontWeight: 600 }}>💡 Contoh Kueri:</span>
+                <button
+                  type="button"
+                  className="prompt-chip"
+                  onClick={() => { setSearchQuery('Cari data pegawai Depo Arsip Banjar'); handleSearchNLQuery('Cari data pegawai Depo Arsip Banjar'); }}
+                >
+                  "Cari data pegawai Depo Arsip Banjar"
+                </button>
+                <button
+                  type="button"
+                  className="prompt-chip"
+                  onClick={() => { setSearchQuery('Tampilkan dokumen laporan bulan ini'); handleSearchNLQuery('Tampilkan dokumen laporan bulan ini'); }}
+                >
+                  "Tampilkan dokumen laporan bulan ini"
+                </button>
+                <button
+                  type="button"
+                  className="prompt-chip"
+                  onClick={() => { setSearchQuery('Cari UIM L901 sampai L905'); handleSearchNLQuery('Cari UIM L901 sampai L905'); }}
+                >
+                  "Cari UIM L901 sampai L905"
+                </button>
+              </div>
+            )}
 
             {/* Advanced Filters Panel */}
             {showAdvancedFilters && (
@@ -2967,6 +3138,18 @@ function App() {
             )}
 
             {/* Results Rendering */}
+            {/* AI Natural Language Summary Card */}
+            {nlAiSummary && (
+              <div className="ai-nl-summary-card">
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', fontSize: '0.9rem', fontWeight: 700, color: '#c084fc' }}>
+                  <span>🤖 Analisis AI Bahasa Alami</span>
+                </div>
+                <div style={{ fontSize: '0.88rem', lineHeight: '1.5' }}>
+                  {nlAiSummary}
+                </div>
+              </div>
+            )}
+
             {(searchUIState === 'preview' || searchUIState === 'results') && searchResults.length > 0 && (
               <div className="results-container">
                 
@@ -4072,6 +4255,15 @@ function App() {
                               }}
                             >
                               📥 Unduh Excel
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-chat-file"
+                              onClick={() => handleOpenChatWithFile(file)}
+                              title={`Chat & Tanya-Jawab AI tentang berkas ${file.filename}`}
+                              style={{ marginRight: '8px' }}
+                            >
+                              💬 Chat Berkas Ini
                             </button>
                             {user.role === 'admin' && (
                               <button 
@@ -5577,6 +5769,126 @@ function App() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Chat with File */}
+      {showChatWithFileModal && activeChatFile && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.5rem', width: '100%', maxWidth: '650px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 50px rgba(0,0,0,0.6)' }}>
+            
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingBottom: '1rem', borderBottom: '1px solid var(--glass-border)', marginBottom: '1rem' }}>
+              <div>
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  💬 Chat AI Berkas: <span style={{ color: '#c084fc' }}>{activeChatFile.filename}</span>
+                </h3>
+                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '4px 0 0 0' }}>
+                  📊 Total Baris: {activeChatFile.row_count || 'Beberapa'} · 📁 Sheet: {Array.isArray(activeChatFile.sheet_names) ? activeChatFile.sheet_names.join(', ') : 'Utama'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowChatWithFileModal(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: '1.2rem', cursor: 'pointer' }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Quick Prompt Chips for File */}
+            <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '1rem' }}>
+              <button
+                type="button"
+                className="prompt-chip"
+                onClick={() => handleSendFileChat(null, 'Ringkas isi berkas ini secara singkat dan padat')}
+              >
+                💡 Ringkas Isi Berkas
+              </button>
+              <button
+                type="button"
+                className="prompt-chip"
+                onClick={() => handleSendFileChat(null, 'Tampilkan 5 baris data pertama dalam berkas ini')}
+              >
+                💡 5 Data Pertama
+              </button>
+              <button
+                type="button"
+                className="prompt-chip"
+                onClick={() => handleSendFileChat(null, 'Hitung jumlah pegawai berdasarkan unit kerja di berkas ini')}
+              >
+                💡 Jumlah per Unit Kerja
+              </button>
+            </div>
+
+            {/* Chat Conversation History Body */}
+            <div style={{ flex: 1, overflowY: 'auto', paddingRight: '6px', display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1rem', minHeight: '260px' }}>
+              {chatFileMessages.map((msg) => (
+                <div
+                  key={msg.id}
+                  style={{
+                    alignSelf: msg.sender === 'user' ? 'flex-end' : 'flex-start',
+                    maxWidth: '85%',
+                    background: msg.sender === 'user' ? 'linear-gradient(135deg, #3b82f6, #8b5cf6)' : 'var(--bg-tertiary)',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: msg.sender === 'user' ? '16px 16px 2px 16px' : '16px 16px 16px 2px',
+                    padding: '0.85rem 1.1rem',
+                    color: '#fff',
+                    fontSize: '0.88rem',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '4px', fontSize: '0.75rem', opacity: 0.8 }}>
+                    <strong>{msg.sender === 'user' ? 'Anda' : '🤖 AI File Assistant'}</strong>
+                    <span>{msg.timestamp}</span>
+                  </div>
+                  <div style={{ whiteSpace: 'pre-wrap', lineHeight: '1.5' }}>
+                    {msg.text}
+                  </div>
+
+                  {/* Sources Citations */}
+                  {msg.sources && msg.sources.length > 0 && (
+                    <div style={{ marginTop: '8px', paddingTop: '6px', borderTop: '1px solid rgba(255,255,255,0.15)', fontSize: '0.78rem' }}>
+                      <strong style={{ color: '#a78bfa' }}>📍 Referensi Kutipan Baris:</strong>
+                      <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '4px' }}>
+                        {msg.sources.map((src, i) => (
+                          <span key={i} style={{ background: 'rgba(139, 92, 246, 0.25)', border: '1px solid rgba(139, 92, 246, 0.4)', borderRadius: '4px', padding: '2px 6px', fontSize: '0.74rem' }}>
+                            #{src.row_number || src.rowNumber} ({src.sheet_name || src.sheetName})
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {chatFileLoading && (
+                <div style={{ alignSelf: 'flex-start', background: 'var(--bg-tertiary)', padding: '0.75rem 1rem', borderRadius: '12px', color: 'var(--text-muted)', fontSize: '0.82rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div className="spinner" style={{ width: '14px', height: '14px' }}></div>
+                  <span>AI sedang menganalisis isi berkas...</span>
+                </div>
+              )}
+            </div>
+
+            {/* Input Form */}
+            <form onSubmit={handleSendFileChat} style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                placeholder={`Tanyakan sesuatu tentang ${activeChatFile.filename}...`}
+                value={chatFileInput}
+                onChange={(e) => setChatFileInput(e.target.value)}
+                disabled={chatFileLoading}
+                style={{ flex: 1, padding: '0.7rem 1rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '10px', color: 'var(--text-primary)', fontSize: '0.88rem' }}
+              />
+              <button
+                type="submit"
+                disabled={chatFileLoading || !chatFileInput.trim()}
+                style={{ padding: '0.7rem 1.2rem', background: 'linear-gradient(135deg, #8b5cf6, #3b82f6)', border: 'none', borderRadius: '10px', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.88rem' }}
+              >
+                Kirim 🚀
+              </button>
+            </form>
+
           </div>
         </div>
       )}

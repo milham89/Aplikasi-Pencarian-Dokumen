@@ -1418,6 +1418,102 @@ mark.highlight {
 .dashboard-header {
   display: flex;
   align-items: center;
+}
+
+/* ===== AI NATURAL LANGUAGE QUERY & CHAT WITH FILE ===== */
+.ai-mode-selector {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ai-mode-pill {
+  padding: 0.4rem 0.85rem;
+  border-radius: 20px;
+  border: 1px solid var(--glass-border);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ai-mode-pill:hover {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+.ai-mode-pill.active {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(236, 72, 153, 0.25));
+  border-color: #ec4899;
+  color: #fff;
+  box-shadow: 0 0 12px rgba(236, 72, 153, 0.3);
+}
+
+.prompt-chips-container {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+  align-items: center;
+}
+.prompt-chip {
+  padding: 0.35rem 0.75rem;
+  border-radius: 16px;
+  background: rgba(139, 92, 246, 0.12);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  color: #c084fc;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.prompt-chip:hover {
+  background: rgba(139, 92, 246, 0.25);
+  border-color: #a855f7;
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.ai-nl-summary-card {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.15), rgba(59, 130, 246, 0.12));
+  border: 1px solid rgba(139, 92, 246, 0.35);
+  border-radius: 12px;
+  padding: 1.1rem 1.3rem;
+  margin-bottom: 1.5rem;
+  color: var(--text-primary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+.ai-nl-summary-card strong {
+  color: #c084fc;
+}
+
+.btn-chat-file {
+  background: linear-gradient(135deg, #8b5cf6, #3b82f6);
+  color: #fff;
+  border: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.2s ease;
+}
+.btn-chat-file:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
   margin-bottom: 1.5rem;
