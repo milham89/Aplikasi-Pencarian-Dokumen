@@ -5332,6 +5332,61 @@ function App() {
         </div>
       )}
 
+      {/* Modal Bulk Update Unit Kerja (Checked Items) */}
+      {showBulkUnitModal && (
+        <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
+          <div style={{ background: 'var(--bg-secondary)', border: '1px solid var(--glass-border)', borderRadius: '16px', padding: '1.75rem', width: '100%', maxWidth: '500px', boxShadow: '0 20px 40px rgba(0,0,0,0.5)' }}>
+            <h3 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              🏢 Update Unit Kerja Massal
+            </h3>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '1.25rem' }}>
+              Mengubah Unit Kerja untuk <strong style={{ color: '#60a5fa' }}>{selectedUimIds.length} data UIM terpilih</strong> secara bersamaan.
+            </p>
+            <form onSubmit={handleSaveBulkUnit}>
+              <div className="form-group" style={{ marginBottom: '1.25rem' }}>
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Pilih Dari Daftar Unit Kerja Yang Ada:</label>
+                <select
+                  onChange={(e) => { if (e.target.value) setBulkUnitValue(e.target.value); }}
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.88rem', marginBottom: '1rem' }}
+                >
+                  <option value="">-- Pilih Unit Kerja Yang Sudah Ada --</option>
+                  {uimUnits.map((u, i) => (
+                    <option key={i} value={u}>{u}</option>
+                  ))}
+                </select>
+
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>Atau Ketik Nama Unit Kerja Baru:</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Depo Arsip Majalengka 2"
+                  value={bulkUnitValue}
+                  onChange={(e) => setBulkUnitValue(e.target.value)}
+                  required
+                  style={{ width: '100%', padding: '0.65rem 0.9rem', background: 'var(--bg-tertiary)', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowBulkUnitModal(false)}
+                  style={{ padding: '0.6rem 1.2rem', background: 'transparent', border: '1px solid var(--glass-border)', borderRadius: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={bulkUnitSaving}
+                  style={{ padding: '0.6rem 1.4rem', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: 'none', borderRadius: '8px', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}
+                >
+                  {bulkUnitSaving ? 'Menyimpan...' : `Simpan Update (${selectedUimIds.length} Data)`}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Modal Rename / Move Unit Kerja */}
       {showRenameUnitModal && (
         <div className="modal-overlay" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999 }}>
