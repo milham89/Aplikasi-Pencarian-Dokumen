@@ -624,6 +624,253 @@ function App() {
     }
   };
 
+  const handleExportUimExcel = async () => {
+    try {
+      showToast('📊 Mengunduh Excel', 'Menyiapkan berkas Excel Data UIM...', 'info');
+      
+      const params = new URLSearchParams({
+        page: 1,
+        limit: 10000,
+        search: uimSearch.trim(),
+        unit: uimUnitFilter !== 'ALL' ? uimUnitFilter : ''
+      });
+      
+      const res = await apiFetch(`/api/uim?${params.toString()}`);
+      if (!res.ok) throw new Error('Gagal mengambil data UIM untuk diekspor.');
+      const data = await safeJson(res);
+      const records = data.records || uimRecords;
+
+      const headers = ['NO', 'USER ID / UIM', 'NAMA LENGKAP', 'UNIT KERJA', 'TANGGAL DIINPUT'];
+      const rows = records.map((item, idx) => [
+        idx + 1,
+        item.uim_code || '',
+        item.full_name || '',
+        item.unit_kerja || '',
+        item.created_at ? new Date(item.created_at).toLocaleDateString('id-ID') : '—'
+      ]);
+
+      const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      ws['!cols'] = [
+        { wch: 8 },
+        { wch: 18 },
+        { wch: 38 },
+        { wch: 32 },
+        { wch: 18 }
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Data UIM');
+
+      const dateStr = new Date().toISOString().slice(0, 10);
+      const unitLabel = uimUnitFilter !== 'ALL' ? uimUnitFilter.replace(/[^a-zA-Z0-9]/g, '_') : 'Semua';
+      const filename = `Data_UIM_${unitLabel}_${dateStr}.xlsx`;
+      
+      XLSX.writeFile(wb, filename);
+      showToast('✅ Berhasil Export Excel', `Data UIM (${records.length} baris) berhasil diunduh.`, 'success');
+    } catch (err) {
+      console.error('Error exporting UIM to Excel:', err);
+      showToast('⚠️ Export Gagal', err.message, 'error');
+    }
+  };
+
+  const handleExportUimPdf = async () => {
+    try {
+      showToast('📄 Mengunduh PDF', 'Menyiapkan dokumen PDF Data UIM...', 'info');
+
+      const params = new URLSearchParams({
+        page: 1,
+        limit: 10000,
+        search: uimSearch.trim(),
+        unit: uimUnitFilter !== 'ALL' ? uimUnitFilter : ''
+      });
+
+      const res = await apiFetch(`/api/uim?${params.toString()}`);
+      if (!res.ok) throw new Error('Gagal mengambil data UIM untuk cetak PDF.');
+      const data = await safeJson(res);
+      const records = data.records || uimRecords;
+
+      const printWindow = window.open('', '_blank');
+      if (!printWindow) {
+        showToast('⚠️ Pop-up Diblokir', 'Izinkan pop-up browser untuk mencetak/mengunduh PDF.', 'warning');
+        return;
+      }
+
+      const currentDate = new Date().toLocaleDateString('id-ID', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      const tableRowsHtml = records.map((item, idx) => `
+        <tr>
+          <td style="text-align: center; font-weight: 600; color: #4b5563;">${idx + 1}</td>
+          <td><span style="display: inline-block; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; font-family: monospace; font-weight: 700; padding: 2px 8px; border-radius: 4px; font-size: 13px;">${item.uim_code || ''}</span></td>
+          <td style="font-weight: 600; color: #111827;">${item.full_name || ''}</td>
+          <td><span style="display: inline-block; background: #f3e8ff; color: #6b21a8; border: 1px solid #e9d5ff; font-weight: 500; padding: 2px 8px; border-radius: 4px; font-size: 12px;">${item.unit_kerja || '—'}</span></td>
+        </tr>
+      `).join('');
+
+      const unitLabelText = uimUnitFilter === 'ALL' ? 'Semua Unit Kerja' : uimUnitFilter;
+
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Laporan Data UIM - SpreadSheet Finder</title>
+          <style>
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+            body {
+              font-family: 'Inter', sans-serif;
+              color: #1f2937;
+              margin: 0;
+              padding: 24px;
+              background: #fff;
+            }
+            .header-container {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              border-bottom: 2px solid #2563eb;
+              padding-bottom: 16px;
+              margin-bottom: 20px;
+            }
+            .header-title h1 {
+              font-size: 20px;
+              font-weight: 800;
+              color: #1e3a8a;
+              margin: 0 0 4px 0;
+            }
+            .header-title p {
+              font-size: 13px;
+              color: #4b5563;
+              margin: 0;
+            }
+            .meta-grid {
+              display: grid;
+              grid-template-columns: repeat(3, 1fr);
+              gap: 12px;
+              background: #f8fafc;
+              border: 1px solid #e2e8f0;
+              border-radius: 8px;
+              padding: 12px 16px;
+              margin-bottom: 20px;
+              font-size: 12px;
+            }
+            .meta-item strong {
+              color: #475569;
+              display: block;
+              font-size: 11px;
+              text-transform: uppercase;
+            }
+            .meta-item span {
+              font-size: 13px;
+              font-weight: 700;
+              color: #0f172a;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 10px;
+              font-size: 13px;
+            }
+            th {
+              background: #1e293b;
+              color: #fff;
+              text-align: left;
+              padding: 10px 12px;
+              font-size: 11px;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+            }
+            td {
+              padding: 9px 12px;
+              border-bottom: 1px solid #e2e8f0;
+              vertical-align: middle;
+            }
+            tr:nth-child(even) {
+              background-color: #f8fafc;
+            }
+            .footer {
+              margin-top: 30px;
+              display: flex;
+              justify-content: space-between;
+              font-size: 11px;
+              color: #64748b;
+              border-top: 1px solid #e2e8f0;
+              padding-top: 12px;
+            }
+            @media print {
+              body { padding: 0; }
+              @page { margin: 1.5cm; size: A4 portrait; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header-container">
+            <div class="header-title">
+              <h1>SpreadSheet Finder — Laporan Data UIM</h1>
+              <p>User ID Management Directory System</p>
+            </div>
+            <div style="text-align: right; font-size: 12px; color: #475569;">
+              <strong>Dokumen Resmi System</strong>
+            </div>
+          </div>
+
+          <div class="meta-grid">
+            <div class="meta-item">
+              <strong>Tanggal Cetak:</strong>
+              <span>${currentDate}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Filter Unit Kerja:</strong>
+              <span>${unitLabelText}</span>
+            </div>
+            <div class="meta-item">
+              <strong>Total Data UIM:</strong>
+              <span>${records.length} Baris</span>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 50px; text-align: center;">NO</th>
+                <th style="width: 140px;">USER ID / UIM</th>
+                <th>NAMA LENGKAP</th>
+                <th>UNIT KERJA</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRowsHtml}
+            </tbody>
+          </table>
+
+          <div class="footer">
+            <span>© SpreadSheet Finder — Dicetak secara otomatis dari sistem</span>
+            <span>Halaman 1</span>
+          </div>
+
+          <script>
+            window.onload = function() {
+              window.print();
+            };
+          </script>
+        </body>
+        </html>
+      `;
+
+      printWindow.document.write(htmlContent);
+      printWindow.document.close();
+      showToast('📄 Siap Dicetak / Simpan PDF', 'Jendela cetak PDF telah dibuka.', 'success');
+    } catch (err) {
+      console.error('Error printing PDF:', err);
+      showToast('⚠️ Gagal Cetak PDF', err.message, 'error');
+    }
+  };
+
   const fetchUsers = useCallback(async () => {
     setLoadingUsers(true);
     try {
@@ -4644,12 +4891,30 @@ function App() {
               </p>
             </div>
             {(user.role === 'admin' || user.role === 'operator') && (
-              <div style={{ display: 'flex', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={handleExportUimExcel}
+                  style={{ background: 'linear-gradient(135deg, #10b981, #059669)', color: '#fff', border: 'none', padding: '0.55rem 1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' }}
+                  title="Unduh Data UIM ke Format Microsoft Excel (.xlsx)"
+                >
+                  📊 Export Excel
+                </button>
+                <button
+                  type="button"
+                  className="btn-sm"
+                  onClick={handleExportUimPdf}
+                  style={{ background: 'linear-gradient(135deg, #ef4444, #dc2626)', color: '#fff', border: 'none', padding: '0.55rem 1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' }}
+                  title="Cetak atau Simpan Data UIM ke Format PDF (.pdf)"
+                >
+                  📄 Export PDF
+                </button>
                 <button
                   type="button"
                   className="btn-sm"
                   onClick={handleOpenAddUim}
-                  style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', border: 'none', padding: '0.55rem 1.1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', border: 'none', padding: '0.55rem 1.1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' }}
                 >
                   ➕ Tambah Data UIM
                 </button>
