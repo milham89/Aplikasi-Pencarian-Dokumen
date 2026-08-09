@@ -229,6 +229,8 @@ function App() {
   const [logLimit, setLogLimit] = useState(50);
   const [logTotal, setLogTotal] = useState(0);
   const [logTotalPages, setLogTotalPages] = useState(1);
+  const [logTypeFilter, setLogTypeFilter] = useState('ALL');
+  const [availableLogTypes, setAvailableLogTypes] = useState([]);
   
   // Upload state
   const [uploading, setUploading] = useState(false);
@@ -363,19 +365,19 @@ function App() {
     localStorage.setItem('spreadsheet_bookmark_visible_columns', JSON.stringify(bookmarkVisibleColumns));
   }, [bookmarkVisibleColumns]);
 
-  // Fetch logs when logs tab is selected, or when search/page/limit changes
+  // Fetch logs when logs tab is selected, or when search/page/limit/type changes
   useEffect(() => {
     if (activeTab === 'logs') {
-      fetchLogs(logSearch, logPage, logLimit);
+      fetchLogs(logSearch, logPage, logLimit, logTypeFilter);
     }
-  }, [activeTab, logPage, logLimit]);
+  }, [activeTab, logPage, logLimit, logTypeFilter]);
 
   // Debounce log search
   useEffect(() => {
     if (activeTab !== 'logs') return;
     const timer = setTimeout(() => {
       setLogPage(1);
-      fetchLogs(logSearch, 1, logLimit);
+      fetchLogs(logSearch, 1, logLimit, logTypeFilter);
     }, 300);
     return () => clearTimeout(timer);
   }, [logSearch]);
@@ -1414,18 +1416,23 @@ function App() {
   };
 
   // Get paginated + searchable activity logs
-  const fetchLogs = async (q = logSearch, page = logPage, limit = logLimit) => {
+  const fetchLogs = async (q = logSearch, page = logPage, limit = logLimit, typeFilter = logTypeFilter) => {
     setLoadingLogs(true);
     setLogsError(null);
     try {
       const params = new URLSearchParams({ page, limit });
       if (q) params.append('q', q);
+      if (typeFilter && typeFilter !== 'ALL') params.append('type', typeFilter);
+
       const res = await apiFetch(`/api/logs?${params}`);
       if (res.ok) {
         const data = await res.json();
         setLogs(data.logs || []);
         setLogTotal(data.total || 0);
         setLogTotalPages(data.totalPages || 1);
+        if (data.availableTypes) {
+          setAvailableLogTypes(data.availableTypes);
+        }
       } else {
         throw new Error('Gagal mengambil log');
       }
@@ -4059,14 +4066,14 @@ function App() {
               </div>
             </div>
 
-            {/* Search + Per-page controls */}
-            <div className="logs-controls">
-              <div className="logs-search-wrapper">
+            {/* Search + Type Filter + Per-page controls */}
+            <div className="logs-controls" style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
+              <div className="logs-search-wrapper" style={{ flex: 1, minWidth: '220px' }}>
                 <span className="logs-search-icon">🔍</span>
                 <input
                   type="text"
                   className="logs-search-input"
-                  placeholder="Cari aktivitas, kata kunci, tipe..."
+                  placeholder="Cari aktivitas, kata kunci, username..."
                   value={logSearch}
                   onChange={e => setLogSearch(e.target.value)}
                 />
@@ -4074,6 +4081,56 @@ function App() {
                   <button className="logs-search-clear" onClick={() => setLogSearch('')}>✕</button>
                 )}
               </div>
+
+              {/* Activity Type Dropdown Filter */}
+              <div className="logs-type-filter" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Tipe Aktivitas:</label>
+                <select
+                  value={logTypeFilter}
+                  onChange={(e) => {
+                    setLogTypeFilter(e.target.value);
+                    setLogPage(1);
+                  }}
+                  style={{
+                    padding: '0.55rem 0.9rem',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: '8px',
+                    color: 'var(--text-primary)',
+                    fontSize: '0.85rem',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <option value="ALL">Semua Tipe Aktivitas ({availableLogTypes.length})</option>
+                  <option value="login">🔓 Login Berhasil</option>
+                  <option value="login_failed">⚠️ Login Gagal</option>
+                  <option value="logout">🚪 Logout</option>
+                  <option value="search">🔍 Pencarian Dokumen</option>
+                  <option value="view_file">👁️ Lihat / Buka Berkas</option>
+                  <option value="download">📥 Download Berkas</option>
+                  <option value="upload">📤 Upload Berkas Excel</option>
+                  <option value="delete">🗑️ Hapus Berkas</option>
+                  <option value="create_uim">🪪 Tambah UIM Baru</option>
+                  <option value="update_uim">✏️ Edit Data UIM</option>
+                  <option value="delete_uim">🗑️ Hapus Data UIM</option>
+                  <option value="bulk_update_uim_unit">🏢 Update Unit UIM Massal</option>
+                  <option value="rename_uim_unit">🔄 Pindah Unit UIM</option>
+                  <option value="import_uim">📊 Import Data UIM</option>
+                  <option value="create_user">👤 Tambah Akun User</option>
+                  <option value="update_user">✏️ Edit Akun User</option>
+                  <option value="delete_user">🗑️ Hapus Akun User</option>
+                  <option value="add_bookmark">⭐ Tambah Bookmark</option>
+                  <option value="delete_bookmark">🗑️ Hapus Bookmark</option>
+                  <option value="chat_ai">🤖 Tanya AI Chatbot</option>
+                  {availableLogTypes
+                    .filter(t => !['login','login_failed','logout','search','view_file','download','upload','delete','create_uim','update_uim','delete_uim','bulk_update_uim_unit','rename_uim_unit','import_uim','create_user','update_user','delete_user','add_bookmark','delete_bookmark','chat_ai'].includes(t))
+                    .map(t => (
+                      <option key={t} value={t}>🔹 {t}</option>
+                    ))
+                  }
+                </select>
+              </div>
+
               <div className="logs-per-page">
                 <label>Tampilkan</label>
                 <select
@@ -4148,6 +4205,13 @@ function App() {
                         if (log.activity_type === 'add_bookmark')      { tagClass = 'tag-success';   typeLabel = '⭐ +Bookmark'; }
                         if (log.activity_type === 'delete_bookmark')   { tagClass = 'tag-danger';    typeLabel = '⭐ -Bookmark'; }
                         if (log.activity_type === 'edit_bookmark')     { tagClass = 'tag-info';      typeLabel = '✏️ Catatan Book'; }
+                        if (log.activity_type === 'create_uim')        { tagClass = 'tag-success';   typeLabel = '🪪 +UIM'; }
+                        if (log.activity_type === 'update_uim')        { tagClass = 'tag-info';      typeLabel = '✏️ Edit UIM'; }
+                        if (log.activity_type === 'delete_uim')        { tagClass = 'tag-danger';    typeLabel = '🗑️ Hapus UIM'; }
+                        if (log.activity_type === 'bulk_update_uim_unit') { tagClass = 'tag-info';   typeLabel = '🏢 Massal Unit'; }
+                        if (log.activity_type === 'rename_uim_unit')   { tagClass = 'tag-info';      typeLabel = '🔄 Pindah Unit'; }
+                        if (log.activity_type === 'import_uim')        { tagClass = 'tag-success';   typeLabel = '📊 Import UIM'; }
+                        if (log.activity_type === 'chat_ai')           { tagClass = 'tag-info';      typeLabel = '🤖 Tanya AI'; }
                         if (log.activity_type === 'view_file')         { tagClass = 'tag-info';      typeLabel = '📂 Lihat Berkas'; }
                         if (log.activity_type === 'edit_document')     { tagClass = 'tag-warning';   typeLabel = '✏️ Edit Baris'; }
                         if (log.activity_type === 'send_notification') { tagClass = 'tag-access';    typeLabel = '📢 Kirim Notif'; }

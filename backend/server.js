@@ -2197,18 +2197,29 @@ app.get('/api/files', authenticateToken, async (req, res) => {
   }
 });
 
-// 5b. Get activity logs (with search + pagination)
+// 5b. Get activity logs (with search + type filter + pagination)
 app.get('/api/logs', authenticateToken, requireRole(['admin']), async (req, res) => {
   try {
     const page  = Math.max(1, parseInt(req.query.page)  || 1);
     const limit = Math.min(500, Math.max(10, parseInt(req.query.limit) || 50));
     const q     = (req.query.q || '').trim();
+    const type  = (req.query.type || '').trim();
     const offset = (page - 1) * limit;
 
-    const conditions = q
-      ? `WHERE (activity_details ILIKE $1 OR activity_type ILIKE $1 OR ip_address ILIKE $1 OR browser ILIKE $1 OR os ILIKE $1 OR device_label ILIKE $1 OR username ILIKE $1)`
-      : '';
-    const params = q ? [`%${q}%`] : [];
+    const whereClauses = [];
+    const params = [];
+
+    if (q) {
+      params.push(`%${q}%`);
+      whereClauses.push(`(activity_details ILIKE $${params.length} OR activity_type ILIKE $${params.length} OR ip_address ILIKE $${params.length} OR browser ILIKE $${params.length} OR os ILIKE $${params.length} OR device_label ILIKE $${params.length} OR username ILIKE $${params.length})`);
+    }
+
+    if (type && type !== 'ALL') {
+      params.push(type);
+      whereClauses.push(`activity_type = $${params.length}`);
+    }
+
+    const conditions = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
     const countRes = await pool.query(
       `SELECT COUNT(*) FROM activity_logs ${conditions}`, params
@@ -2226,12 +2237,17 @@ app.get('/api/logs', authenticateToken, requireRole(['admin']), async (req, res)
       [...params, limit, offset]
     );
 
+    // Fetch distinct activity types for dropdown filter
+    const typesRes = await pool.query(`SELECT DISTINCT activity_type FROM activity_logs WHERE activity_type IS NOT NULL AND activity_type != '' ORDER BY activity_type ASC;`);
+    const availableTypes = typesRes.rows.map(r => r.activity_type);
+
     res.json({
       logs: dataRes.rows,
       total,
       page,
       limit,
-      totalPages: Math.ceil(total / limit)
+      totalPages: Math.ceil(total / limit),
+      availableTypes
     });
   } catch (err) {
     console.error('Error saat mengambil log aktivitas:', err);
