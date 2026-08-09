@@ -5018,6 +5018,15 @@ function App() {
                 <button
                   type="button"
                   className="btn-sm"
+                  onClick={() => handleOpenRenameUnitModal(uimUnitFilter !== 'ALL' ? uimUnitFilter : '')}
+                  style={{ background: 'linear-gradient(135deg, #8b5cf6, #ec4899)', color: '#fff', border: 'none', padding: '0.55rem 1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' }}
+                  title="Ubah / Pindahkan Seluruh Pegawai Dari Suatu Unit Kerja"
+                >
+                  🔄 Ubah Semua Pegawai Unit
+                </button>
+                <button
+                  type="button"
+                  className="btn-sm"
                   onClick={handleOpenAddUim}
                   style={{ background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', color: '#fff', border: 'none', padding: '0.55rem 1.1rem', borderRadius: '8px', fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.82rem' }}
                 >
@@ -5047,7 +5056,7 @@ function App() {
               )}
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <label style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 600 }}>Unit Kerja:</label>
               <select
                 value={uimUnitFilter}
@@ -5059,17 +5068,6 @@ function App() {
                   <option key={i} value={u}>{u}</option>
                 ))}
               </select>
-
-              {(user.role === 'admin' || user.role === 'operator') && uimUnitFilter !== 'ALL' && (
-                <button
-                  type="button"
-                  onClick={() => handleOpenRenameUnitModal(uimUnitFilter)}
-                  style={{ background: 'linear-gradient(135deg, #8b5cf6, #ec4899)', color: '#fff', border: 'none', padding: '0.55rem 0.9rem', borderRadius: '8px', fontWeight: 600, fontSize: '0.82rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
-                  title={`Ubah Nama Unit Kerja "${uimUnitFilter}" Untuk Seluruh Pegawai`}
-                >
-                  🔄 Ubah Semua Pegawai Unit Ini ({uimTotalRecords})
-                </button>
-              )}
             </div>
           </div>
 
