@@ -128,11 +128,11 @@ const uploadChunkMulter = multer({
 
 // PostgreSQL Database Connection Pool
 const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'excel_db',
-  password: process.env.DB_PASSWORD || 'mysecretpassword',
-  port: process.env.DB_PORT || 5432,
+  user: process.env.DB_USER || process.env.POSTGRES_USER || 'postgres',
+  host: process.env.DB_HOST || process.env.POSTGRES_HOST || 'localhost',
+  database: process.env.DB_NAME || process.env.POSTGRES_DB || 'excel_db',
+  password: process.env.DB_PASSWORD || process.env.POSTGRES_PASSWORD || 'mysecretpassword',
+  port: process.env.DB_PORT || process.env.POSTGRES_PORT || 5432,
 });
 
 // Database Migration on startup
