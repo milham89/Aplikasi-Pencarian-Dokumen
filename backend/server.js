@@ -921,7 +921,10 @@ app.post('/api/auth/login', async (req, res) => {
     });
   } catch (err) {
     console.error('Error login:', err);
-    res.status(500).json({ error: 'Terjadi kesalahan pada server saat login.' });
+    const dbErrorMsg = (err.code === 'ECONNREFUSED' || err.message.includes('connect') || err.message.includes('Connection'))
+      ? 'Database PostgreSQL sedang offline atau dalam proses restart.'
+      : 'Terjadi kesalahan pada server saat login: ' + err.message;
+    res.status(500).json({ error: dbErrorMsg });
   }
 });
 
@@ -1316,7 +1319,8 @@ app.get('/api/health', async (req, res) => {
     logActivity('access', `Perangkat mengakses aplikasi dari ${device.ip}`, device);
     res.json({ status: 'ok', database: 'connected' });
   } catch (err) {
-    res.status(500).json({ status: 'error', database: err.message });
+    console.error('Health check DB error:', err.message);
+    res.status(200).json({ status: 'offline', database: 'disconnected', error: err.message });
   }
 });
 
