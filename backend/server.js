@@ -2047,7 +2047,7 @@ app.get('/api/search', authenticateToken, async (req, res) => {
           'dia', 'kita', 'tahun', 'bulan', 'hari', 'file', 'berkas', 'dokumen', 
           'tabel', 'sheet', 'cari', 'temukan', 'info', 'informasi', 'lihat', 'berapa',
           'apakah', 'siapa', 'bagaimana', 'apa', 'tolong', 'jelaskan', 'rangkum', 'semua',
-          'daftar', 'total', 'ada', 'berurutan', 'entry', 'entri'
+          'daftar', 'total', 'ada', 'berurutan', 'entry', 'entri', 'uim', 'pegawai', 'unit', 'kode', 'kerja', 'nama', 'nomor', 'no'
         ]);
 
         const searchTerms = rawTerms.filter(t => !stopWords.has(t.toLowerCase()) && t.length >= 2);
@@ -2239,37 +2239,70 @@ app.post('/api/search/nl-query', authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const stopWords = new Set(['cari', 'tampilkan', 'data', 'pegawai', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 'file', 'berkas', 'dokumen', 'laporan', 'tolong', 'ada', 'siapa', 'berapa']);
+    const stopWords = new Set([
+      'cari', 'tampilkan', 'data', 'pegawai', 'yang', 'dan', 'di', 'untuk', 'ke', 'dari', 
+      'file', 'berkas', 'dokumen', 'laporan', 'tolong', 'ada', 'siapa', 'berapa', 'apakah',
+      'uim', 'kode', 'unit', 'kerja', 'nama', 'nomor', 'no', 'orang', 'bapak', 'ibu'
+    ]);
     const rawTokens = queryText.toLowerCase().split(/[\s,.-]+/).filter(Boolean);
-    const keywords = rawTokens.filter(t => !stopWords.has(t) && t.length > 1);
+    const keywords = rawTokens.filter(t => !stopWords.has(t) && t.length >= 2);
     const finalKeywords = keywords.length > 0 ? keywords : rawTokens;
 
     const filterClauses = [];
+    const scoreExpressions = [];
     const queryParams = [];
 
     finalKeywords.forEach((kw) => {
       queryParams.push(`%${kw}%`);
-      filterClauses.push(`r.row_data::text ILIKE $${queryParams.length}`);
+      const pIdx = queryParams.length;
+      filterClauses.push(`r.row_data::text ILIKE $${pIdx}`);
+      scoreExpressions.push(`(CASE WHEN r.row_data::text ILIKE $${pIdx} THEN 50 ELSE 0 END)`);
     });
+
+    queryParams.push(`%${queryText}%`);
+    const fullQueryIdx = queryParams.length;
 
     const userIdParamIndex = queryParams.length + 1;
     queryParams.push(userId);
 
-    const searchQuery = `
+    const whereCondition = filterClauses.length > 1
+      ? filterClauses.join(' AND ')
+      : (filterClauses.length === 1 ? filterClauses[0] : '1=1');
+
+    let searchQuery = `
       SELECT 
         r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, 
         f.filename, f.uploaded_at,
-        (b.id IS NOT NULL) AS is_bookmarked
+        (b.id IS NOT NULL) AS is_bookmarked,
+        ((CASE WHEN r.row_data::text ILIKE $${fullQueryIdx} THEN 100 ELSE 0 END) + ${scoreExpressions.join(' + ')}) AS relevance_score
       FROM document_rows r
       JOIN uploaded_files f ON r.file_id = f.id
       LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
-      ${filterClauses.length > 0 ? `WHERE ${filterClauses.join(' OR ')}` : ''}
-      ORDER BY r.row_number ASC
+      WHERE ${whereCondition}
+      ORDER BY relevance_score DESC, r.row_number ASC
       LIMIT 150;
     `;
 
-    const searchRes = await pool.query(searchQuery, queryParams);
-    const searchRows = searchRes.rows;
+    let searchRes = await pool.query(searchQuery, queryParams);
+    let searchRows = searchRes.rows;
+
+    if (searchRows.length === 0 && filterClauses.length > 1) {
+      const fallbackQuery = `
+        SELECT 
+          r.id, r.file_id, r.sheet_name, r.row_number, r.row_data, 
+          f.filename, f.uploaded_at,
+          (b.id IS NOT NULL) AS is_bookmarked,
+          (${scoreExpressions.join(' + ')}) AS relevance_score
+        FROM document_rows r
+        JOIN uploaded_files f ON r.file_id = f.id
+        LEFT JOIN bookmarks b ON b.row_id = r.id AND b.user_id = $${userIdParamIndex}
+        WHERE ${filterClauses.join(' OR ')}
+        ORDER BY relevance_score DESC, r.row_number ASC
+        LIMIT 150;
+      `;
+      const fallbackRes = await pool.query(fallbackQuery, queryParams);
+      searchRows = fallbackRes.rows;
+    }
 
     const fileMap = new Map();
     searchRows.forEach(row => {
