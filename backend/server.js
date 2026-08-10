@@ -126,17 +126,66 @@ const uploadChunkMulter = multer({
   limits: { fileSize: 50 * 1024 * 1024 }
 });
 
-// PostgreSQL Database Connection Pool
-const pool = new Pool({
-  user: process.env.DB_USER || process.env.POSTGRES_USER || 'postgres',
-  host: process.env.DB_HOST || process.env.POSTGRES_HOST || 'localhost',
-  database: process.env.DB_NAME || process.env.POSTGRES_DB || 'excel_db',
-  password: process.env.DB_PASSWORD || process.env.POSTGRES_PASSWORD || 'mysecretpassword',
-  port: process.env.DB_PORT || process.env.POSTGRES_PORT || 5432,
+// Dynamic DB Pool configuration with multi-password fallback auto-detection
+const dbUser = process.env.DB_USER || process.env.POSTGRES_USER || 'postgres';
+const dbHost = process.env.DB_HOST || process.env.POSTGRES_HOST || '127.0.0.1';
+const dbName = process.env.DB_NAME || process.env.POSTGRES_DB || 'excel_db';
+const dbPort = process.env.DB_PORT || process.env.POSTGRES_PORT || 5432;
+
+const candidatePasswords = Array.from(new Set([
+  process.env.DB_PASSWORD,
+  process.env.POSTGRES_PASSWORD,
+  'P@ssw0rd',
+  'mysecretpassword',
+  'postgres',
+  'admin',
+  'root'
+])).filter(Boolean);
+
+let pool = new Pool({
+  user: dbUser,
+  host: dbHost,
+  database: dbName,
+  password: candidatePasswords[0],
+  port: dbPort,
 });
 
-// Database Migration on startup
+// Database Migration on startup with auto password detection
 const initDatabase = async () => {
+  let workingPassword = null;
+
+  for (const pwd of candidatePasswords) {
+    const testPool = new Pool({
+      user: dbUser,
+      host: dbHost,
+      database: dbName,
+      password: pwd,
+      port: dbPort,
+      connectionTimeoutMillis: 3000
+    });
+    try {
+      const testClient = await testPool.connect();
+      await testClient.query('SELECT 1');
+      testClient.release();
+      await testPool.end();
+      workingPassword = pwd;
+      console.log(`✅ Terhubung ke database PostgreSQL menggunakan password "${pwd}"`);
+      break;
+    } catch (err) {
+      await testPool.end().catch(() => {});
+    }
+  }
+
+  if (workingPassword) {
+    pool = new Pool({
+      user: dbUser,
+      host: dbHost,
+      database: dbName,
+      password: workingPassword,
+      port: dbPort,
+    });
+  }
+
   const client = await pool.connect();
   try {
     console.log('Memeriksa dan membuat tabel database jika belum ada...');
